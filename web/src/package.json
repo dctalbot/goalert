@@ -101,7 +101,8 @@
     "react-router-dom": "5.0.1",
     "react-select": "3.0.4",
     "redux-thunk": "2.3.0",
-    "reselect": "4.0.0"
+    "reselect": "4.0.0",
+    "serviceworker-webpack-plugin": "^1.0.1"
   },
   "devDependencies": {
     "@babel/cli": "7.6.0",
