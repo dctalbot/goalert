@@ -92,7 +92,7 @@ export default class App extends React.PureComponent {
                 }
               />
               <ToolbarTitle />
-              <button id='doIt'>Try to conquer Italy</button>
+              <button id='doIt'>Trigger Alert</button>
 
               <PageActionContainer />
             </Toolbar>
