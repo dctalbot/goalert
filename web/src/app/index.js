@@ -18,7 +18,7 @@ import store from './reduxStore'
 import { GracefulUnmounterProvider } from './util/gracefulUnmount'
 import GA from './util/GoogleAnalytics'
 import { Config, ConfigProvider } from './util/RequireConfig'
-import * as serviceWorker from './myServiceWorker'
+import * as serviceWorker from './push-notifications'
 
 const LazyGARouteTracker = React.memo(props => {
   if (!props.trackingID) {
