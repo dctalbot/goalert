@@ -114,7 +114,7 @@ module.exports = {
     }),
     new webpack.HotModuleReplacementPlugin(),
     new ServiceWorkerWebpackPlugin({
-      entry: path.join(APP, '/sw.js'),
+      entry: path.join(APP, 'push-notifications/sw.js'),
       excludes: ['**/.*', '**/*.map', '*.html'],
       filename: 'sw.js',
     }),
