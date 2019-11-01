@@ -67,28 +67,3 @@ export function unregister() {
     })
   }
 }
-
-/// ////snippets
-// if (Notification.permission == "granted") {
-//   navigator.serviceWorker.getRegistration().then(reg => {
-//     // TODO 2.4 - Add 'options' object to configure the notification
-
-//     reg.showNotification("Hello world!");
-//   });
-// }
-
-self.addEventListener('push', event => {
-  event.waitUntil(
-    self.registration.showNotification('Push Notification', {
-      body: 'Alea iacta est',
-    }),
-  )
-})
-
-self.addEventListener('fetch', event => {
-  event.waitUntil(
-    self.registration.showNotification('Push Notification', {
-      body: 'fetching',
-    }),
-  )
-})
