@@ -51,13 +51,6 @@ function sendNotification() {
 
 /**
  *
- */
-function registerServiceWorker() {
-  return navigator.serviceWorker.register('/sw.js')
-}
-
-/**
- *
  * using the registered service worker creates a push notification subscription and returns it
  *
  */
@@ -89,7 +82,6 @@ export {
   isPushNotificationSupported,
   isServiceWorkerRegistered,
   askUserPermission,
-  registerServiceWorker,
   sendNotification,
   createNotificationSubscription,
   getUserSubscription,
