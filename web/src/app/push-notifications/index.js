@@ -1,5 +1,3 @@
-// import urlBase64ToUint8Array from './util/urlBase64ToUint8Array'
-
 // Register a Service Worker.
 export function register() {
   navigator.serviceWorker.register('./sw.js')
@@ -18,9 +16,6 @@ export function register() {
         // const vapidPublicKey = await response.text();
         const vapidPublicKey =
           'BG1eCfGcKyecTf7adIrdMtd3eRkHnr_nObrxw_ntuUcH9LSdW5W-IqEo7DdPul2Kwh1bpBL4jP9DI7NfYc691Rc'
-        // Chrome doesn't accept the base64-encoded (string) vapidPublicKey yet
-        // urlBase64ToUint8Array() is defined in /tools.js
-        // const convertedVapidKey = urlBase64ToUint8Array(vapidPublicKey)
 
         // Otherwise, subscribe the user (userVisibleOnly allows to specify that we don't plan to
         // send notifications that don't have a visible effect for the user).
