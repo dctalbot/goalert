@@ -19,6 +19,7 @@ import _ from 'lodash-es'
 import Spinner from '../loading/components/Spinner'
 import { GenericError, ObjectNotFound } from '../error-pages'
 import { useConfigValue } from '../util/RequireConfig'
+import WebPushNotificationsToggle from './WebPushNotificationsToggle'
 
 const query = gql`
   query userInfo($id: ID!) {
@@ -164,6 +165,7 @@ export default function UserDetails(props) {
               userID={props.userID}
               readOnly={props.readOnly}
             />
+            <WebPushNotificationsToggle />
           </Grid>
         }
       />
