@@ -1,25 +1,40 @@
 /**
+ * checks if browser is Safari
+ */
+function isSafari() {
+  return 'safari' in window && 'pushNotification' in window.safari
+}
+
+/**
  * checks if Push notification and service workers are supported by your browser
  */
 function isPushNotificationSupported() {
-  return 'serviceWorker' in navigator && 'PushManager' in window
+  return 'serviceWorker' in navigator && 'Notification' in window
 }
 
 /**
  * asks user consent to receive push notifications and returns the response of the user, one of granted, default, denied
  */
-async function askUserPermission() {
-  return Notification.requestPermission()
+function askUserPermission(callback) {
+  try {
+    // Safari doesn't return a promise for requestPermissions and it
+    // throws a TypeError. It takes a callback as the first argument
+    // instead.
+    Notification.requestPermission(perm => {
+      callback(perm)
+    })
+  } catch (error) {
+    // Firefox and Chrome are standard
+    Notification.requestPermission().then(perm => callback(perm))
+  }
 }
 
-function isServiceWorkerRegistered() {
-  return false
-  // let regs = await navigator.serviceWorker.getRegistrations()
-  // regs = regs.map((reg) => {
-  //   console.log(reg)
-  //   if (reg.status === 'activated') return reg
-  // })
-  // return regs.length > 0
+/**
+ * checks if at least one service worker is present
+ */
+async function isServiceWorkerRegistered() {
+  const reg = await navigator.serviceWorker.getRegistration().then(r => r)
+  return reg !== undefined
 }
 
 /**
@@ -57,10 +72,16 @@ function sendNotification() {
 async function createNotificationSubscription() {
   // wait for service worker installation to be ready
   const serviceWorker = await navigator.serviceWorker.ready
+
+  // fetch VAPID key
+  const response = await fetch('/getVapidPublicKey')
+  const json = await response.json()
+  const vapidPublicKey = json.value
+
   // subscribe and return the subscription
   return serviceWorker.pushManager.subscribe({
     userVisibleOnly: true,
-    applicationServerKey: 'pushServerPublicKey',
+    applicationServerKey: vapidPublicKey,
   })
 }
 
@@ -78,11 +99,42 @@ function getUserSubscription() {
     })
 }
 
+function registerForSafariRemoteNotifications() {
+  console.log('DOING THE SFARI THING')
+  const websitePushID = 'web.com.target.GoAlert'
+
+  const permissionData = window.safari.pushNotification.permission(
+    websitePushID,
+  )
+
+  const checkRemotePermission = permissionData => {
+    console.log(permissionData)
+    if (permissionData.permission === 'default') {
+      // This is a new web service URL and its validity is unknown.
+      window.safari.pushNotification.requestPermission(
+        'https://google.com', // The web service URL.
+        websitePushID, // The Website Push ID.
+        {}, // Data that you choose to send to your server to help you identify the user.
+        checkRemotePermission, // The callback function.
+      )
+    } else if (permissionData.permission === 'denied') {
+      // The user said no.
+    } else if (permissionData.permission === 'granted') {
+      // The web service URL is a valid push provider, and the user said yes.
+      // permissionData.deviceToken is now available to use.
+    }
+  }
+  // document.getElementById('spec').onclick =
+  checkRemotePermission(permissionData)
+}
+
 export {
   isPushNotificationSupported,
+  isSafari,
   isServiceWorkerRegistered,
   askUserPermission,
   sendNotification,
   createNotificationSubscription,
   getUserSubscription,
+  registerForSafariRemoteNotifications,
 }

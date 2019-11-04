@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 
 import { styles as globalStyles } from '../styles/materialStyles'
 import { makeStyles, createStyles } from '@material-ui/core/styles'
@@ -10,12 +10,16 @@ import {
   CardContent,
   CardActions,
   Typography,
+  Switch,
 } from '@material-ui/core'
 import * as serviceWorker from '../push-notifications'
 
 import {
   isPushNotificationSupported,
   askUserPermission,
+  isServiceWorkerRegistered,
+  isSafari,
+  registerForSafariRemoteNotifications,
 } from '../push-notifications/util'
 
 const useStyles = makeStyles(theme => {
@@ -28,35 +32,54 @@ const useStyles = makeStyles(theme => {
     },
     cardHeader,
     cardContent: {
-      // display: 'flex'
+      paddingTop: 0,
+    },
+    spaceBetween: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
     },
   })
 })
 
-const getBtnLabel = () => {
-  if (!isPushNotificationSupported()) {
-    return 'Unsupported Browser'
-  }
-
-  return Notification.permission === 'granted' ? 'Enabled' : 'Enable'
-}
-
-const onClick = () => {
-  // TODO provide way to unregister sw (disable push notis)
-  // const registered = isServiceWorkerRegistered()
-  // if (registered) {
-  //   return serviceWorker.unregister()
-  // }
-
-  askUserPermission().then(perm => {
-    if (perm === 'granted') {
-      serviceWorker.register()
-    }
-  })
+const testPushNotification = () => {
+  fetch('/testPushNotification')
 }
 
 export default () => {
   const classes = useStyles()
+
+  const [enabled, setEnabled] = useState(false)
+
+  useEffect(() => {
+    async function doAsync() {
+      const registered = await isServiceWorkerRegistered()
+      setEnabled(registered)
+    }
+    doAsync()
+  }, [])
+
+  const registerIfGranted = perm => {
+    if (perm === 'granted') {
+      serviceWorker.register()
+      setEnabled(true)
+    }
+  }
+
+  const toggleSwitch = async () => {
+    if (isSafari()) {
+      registerForSafariRemoteNotifications()
+      return
+    }
+
+    const registered = await isServiceWorkerRegistered()
+    if (registered) {
+      serviceWorker.unregister()
+      setEnabled(false)
+    } else {
+      askUserPermission(registerIfGranted)
+    }
+  }
 
   return (
     <Grid item xs={12}>
@@ -64,26 +87,27 @@ export default () => {
         <CardHeader
           className={classes.cardHeader}
           component='h3'
-          title='Browser Push Notifications'
+          title='Web Push Notifications'
         />
         <CardContent className={classes.cardContent}>
-          <Typography component='p'>
-            Receive push notifications in your browser for all alerts
-          </Typography>
-          <CardActions>
-            <Button
-              id='toggle-push-notifications'
-              color='primary'
-              disabled={
-                !isPushNotificationSupported() ||
-                Notification.permission === 'granted'
-              }
-              onClick={onClick}
-            >
-              {getBtnLabel()}
-            </Button>
-            <button id='doIt'>Trigger Alert</button>
-          </CardActions>
+          <span className={classes.spaceBetween}>
+            <Typography component='p'>
+              Receive browser push notifications for all alerts
+            </Typography>
+            <CardActions>
+              {enabled && (
+                <Button id='doIt' onClick={testPushNotification}>
+                  Test
+                </Button>
+              )}
+              <Switch
+                id={'spec'}
+                checked={enabled}
+                onChange={toggleSwitch}
+                disabled={!isPushNotificationSupported()}
+              />
+            </CardActions>
+          </span>
         </CardContent>
       </Card>
     </Grid>
