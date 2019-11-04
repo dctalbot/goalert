@@ -2,11 +2,15 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	"os"
+
 	"contrib.go.opencensus.io/exporter/stackdriver/propagation"
+	"github.com/SherClockHolmes/webpush-go"
 	"github.com/target/goalert/config"
 	"github.com/target/goalert/genericapi"
 	"github.com/target/goalert/grafana"
@@ -212,6 +216,23 @@ func (app *App) initHTTP(ctx context.Context) error {
 
 	topMux.HandleFunc("/health", app.healthCheck)
 	topMux.HandleFunc("/health/engine", app.engineStatus)
+
+	topMux.HandleFunc("/getVapidPublicKey", func(w http.ResponseWriter, r *http.Request) {
+		// an example API handler
+		json.NewEncoder(w).Encode(map[string]string{"value": os.Getenv("VAPID_PUBLIC_KEY")})
+	})
+
+	topMux.HandleFunc("/testPushNotification", func(w http.ResponseWriter, r *http.Request) {
+		s := &webpush.Subscription{}
+		// TODO get browser subscription for user
+		destination := `{"endpoint":"https://fcm.googleapis.com/fcm/send/facrcgAVM-E:APA91bF_yMyccFVEJT8TqaXawIJslR4wXN40gG-v4cA7gSjoXhNJ8h1mzc_bkoHUEQf7cipp3yvuP5fvSz-PdJjtvVUQA8rGelP_9p7KGoepVdXOJpMrrt0MtCRpLZcD_IaTTNj_LHUJ","expirationTime":null,"keys":{"p256dh":"BJdDkaCeKOGgyUPlBzvJddh6SXJMoxGCtk42RXdhuYWnfSG-N_4YZvTlqaQohAY7_PdvBLJb6GBF0rJZtyjLcKE","auth":"xnoWkV0jJ3FRNOd4D9QMZg"}}`
+		json.Unmarshal([]byte(destination), s)
+		webpush.SendNotification([]byte(`{"url":"https://t.glrt.me/DV4GR", "message":"Your super service has 42 new alerts", "ackCode":"100aa", "closeCode":"100cc"}`), s, &webpush.Options{
+			VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),
+			VAPIDPrivateKey: os.Getenv("VAPID_PRIVATE_KEY"),
+			TTL:             3600,
+		})
+	})
 
 	webH, err := web.NewHandler(app.cfg.UIURL)
 	if err != nil {
