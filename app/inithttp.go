@@ -219,6 +219,14 @@ func (app *App) initHTTP(ctx context.Context) error {
 	topMux.HandleFunc("/health", app.healthCheck)
 	topMux.HandleFunc("/health/engine", app.engineStatus)
 
+	topMux.HandleFunc("/generateVapidKeys", func(w http.ResponseWriter, r *http.Request) {
+		privateKey, publicKey, err := webpush.GenerateVAPIDKeys()
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]string{"err": err.Error()})
+		}
+		json.NewEncoder(w).Encode(map[string]string{"publicKey": publicKey, "privateKey": privateKey})
+	})
+
 	topMux.HandleFunc("/getVapidPublicKey", func(w http.ResponseWriter, r *http.Request) {
 		// an example API handler
 		json.NewEncoder(w).Encode(map[string]string{"value": os.Getenv("VAPID_PUBLIC_KEY")})
