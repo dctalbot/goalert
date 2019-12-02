@@ -219,23 +219,23 @@ func (app *App) initHTTP(ctx context.Context) error {
 	topMux.HandleFunc("/health", app.healthCheck)
 	topMux.HandleFunc("/health/engine", app.engineStatus)
 
-	topMux.HandleFunc("/generateVapidKeys", func(w http.ResponseWriter, r *http.Request) {
-		privateKey, publicKey, err := webpush.GenerateVAPIDKeys()
-		if err != nil {
-			json.NewEncoder(w).Encode(map[string]string{"err": err.Error()})
-		}
-		json.NewEncoder(w).Encode(map[string]string{"publicKey": publicKey, "privateKey": privateKey})
-	})
+	// topMux.HandleFunc("/generateVapidKeys", func(w http.ResponseWriter, r *http.Request) {
+	// 	privateKey, publicKey, err := webpush.GenerateVAPIDKeys()
+	// 	if err != nil {
+	// 		json.NewEncoder(w).Encode(map[string]string{"err": err.Error()})
+	// 	}
+	// 	json.NewEncoder(w).Encode(map[string]string{"publicKey": publicKey, "privateKey": privateKey})
+	// })
 
-	topMux.HandleFunc("/getVapidPublicKey", func(w http.ResponseWriter, r *http.Request) {
-		// an example API handler
-		json.NewEncoder(w).Encode(map[string]string{"value": os.Getenv("VAPID_PUBLIC_KEY")})
-	})
+	// topMux.HandleFunc("/getVapidPublicKey", func(w http.ResponseWriter, r *http.Request) {
+	// 	// an example API handler
+	// 	json.NewEncoder(w).Encode(map[string]string{"value": os.Getenv("VAPID_PUBLIC_KEY")})
+	// })
 
 	topMux.HandleFunc("/testPushNotification", func(w http.ResponseWriter, r *http.Request) {
 		s := &webpush.Subscription{}
 		// TODO get browser subscription for user
-		destination := `{"endpoint":"https://fcm.googleapis.com/fcm/send/facrcgAVM-E:APA91bF_yMyccFVEJT8TqaXawIJslR4wXN40gG-v4cA7gSjoXhNJ8h1mzc_bkoHUEQf7cipp3yvuP5fvSz-PdJjtvVUQA8rGelP_9p7KGoepVdXOJpMrrt0MtCRpLZcD_IaTTNj_LHUJ","expirationTime":null,"keys":{"p256dh":"BJdDkaCeKOGgyUPlBzvJddh6SXJMoxGCtk42RXdhuYWnfSG-N_4YZvTlqaQohAY7_PdvBLJb6GBF0rJZtyjLcKE","auth":"xnoWkV0jJ3FRNOd4D9QMZg"}}`
+		destination := `{"endpoint":"https://fcm.googleapis.com/fcm/send/cyRa7jFka8M:APA91bFIWWm9yN-sqNxncqp_yQgv8QQbXDPpiJYwquFp5hE1Jk3sDRI0ieulpxB-trTpGtG4GTgFpENQyTqfFXE0FbRalK5Or9CivXdrxS4-KSzN01CAkjZaXRyLyxAvR2fLfqHxn7oi","expirationTime":null,"keys":{"p256dh":"BLDaDnFXuNYkIvZad-0nQ_oEHIPM2VWiOB7d4fEMlOZJPlDAZ_nM2ynhHgLM7rhKekKXnngGxCoeT4KrjLv3F9Q","auth":"w5w3EJkYdoHY50y7ni_sSg"}}`
 		json.Unmarshal([]byte(destination), s)
 		webpush.SendNotification([]byte(`{"url":"https://t.glrt.me/DV4GR", "message":"Your super service has 42 new alerts", "ackCode":"100aa", "closeCode":"100cc"}`), s, &webpush.Options{
 			VAPIDPublicKey:  os.Getenv("VAPID_PUBLIC_KEY"),

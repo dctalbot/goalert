@@ -43,7 +43,7 @@ const useStyles = makeStyles(theme => {
 })
 
 const testPushNotification = () => {
-  fetch('/testPushNotification')
+  fetch('https://blooming-ocean-51906.herokuapp.com/testPushNotification')
 }
 
 export default () => {
@@ -101,7 +101,7 @@ export default () => {
                 </Button>
               )}
               <Switch
-                id={'spec'}
+                id='spec'
                 checked={enabled}
                 onChange={toggleSwitch}
                 disabled={!isPushNotificationSupported()}

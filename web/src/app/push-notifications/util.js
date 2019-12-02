@@ -74,7 +74,10 @@ async function createNotificationSubscription() {
   const serviceWorker = await navigator.serviceWorker.ready
 
   // fetch VAPID key
-  const response = await fetch('/getVapidPublicKey')
+  // const response = await fetch('/getVapidPublicKey') // TODO replace fetch route with this
+  const response = await fetch(
+    'https://blooming-ocean-51906.herokuapp.com/getVapidPublicKey',
+  )
   const json = await response.json()
   const vapidPublicKey = json.value
 
@@ -110,9 +113,10 @@ function registerForSafariRemoteNotifications() {
   const checkRemotePermission = permissionData => {
     console.log(permissionData)
     if (permissionData.permission === 'default') {
+      console.log('default, requesting permission...')
       // This is a new web service URL and its validity is unknown.
       window.safari.pushNotification.requestPermission(
-        'https://google.com', // The web service URL.
+        'https://blooming-ocean-51906.herokuapp.com/push', // The web service URL.
         websitePushID, // The Website Push ID.
         {}, // Data that you choose to send to your server to help you identify the user.
         checkRemotePermission, // The callback function.
