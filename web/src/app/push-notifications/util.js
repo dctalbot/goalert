@@ -103,7 +103,7 @@ function getUserSubscription() {
 }
 
 function registerForSafariRemoteNotifications() {
-  console.log('DOING THE SFARI THING')
+  console.log('DOING THE SAFARI THING')
   const websitePushID = 'web.com.target.GoAlert'
 
   const permissionData = window.safari.pushNotification.permission(
@@ -128,7 +128,6 @@ function registerForSafariRemoteNotifications() {
       // permissionData.deviceToken is now available to use.
     }
   }
-  // document.getElementById('spec').onclick =
   checkRemotePermission(permissionData)
 }
 
