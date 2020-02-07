@@ -11,36 +11,36 @@
 // This function is called when a project is opened or re-opened (e.g. due to
 // the project's config changing)
 
-const wp = require('@cypress/webpack-preprocessor')
+const cyParcel = require('cypress-parcel-preprocessor')
 
 module.exports = (on, config) => {
   require('cypress-plugin-retries/lib/plugin')(on)
 
   // `on` is used to hook into various events Cypress emits
   // `config` is the resolved Cypress config
-  const options = {
-    webpackOptions: {
-      mode: 'development',
-      resolve: { extensions: ['.js', '.ts'] },
-      module: {
-        rules: [
-          {
-            test: /\.json$/,
-            loader: 'json-loader',
-            type: 'javascript/auto',
-          },
-          {
-            test: /\.ts$/,
-            exclude: [/node_modules/],
-            use: [
-              {
-                loader: 'ts-loader',
-              },
-            ],
-          },
-        ],
-      },
-    },
-  }
-  on('file:preprocessor', wp(options))
+  // const options = {
+  //   webpackOptions: {
+  //     mode: 'development',
+  //     resolve: { extensions: ['.js', '.ts'] },
+  //     module: {
+  //       rules: [
+  //         {
+  //           test: /\.json$/,
+  //           loader: 'json-loader',
+  //           type: 'javascript/auto',
+  //         },
+  //         {
+  //           test: /\.ts$/,
+  //           exclude: [/node_modules/],
+  //           use: [
+  //             {
+  //               loader: 'ts-loader',
+  //             },
+  //           ],
+  //         },
+  //       ],
+  //     },
+  //   },
+  // }
+  on('file:preprocessor', cyParcel)
 }
