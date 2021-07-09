@@ -15,4 +15,3 @@ jobs:
           reporter: github-pr-review
           level: warning
           fail_on_error: true
-          workdir: node_modules
