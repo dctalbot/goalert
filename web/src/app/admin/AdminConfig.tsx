@@ -86,7 +86,7 @@ export default function AdminConfig(): JSX.Element {
   const classes = useStyles()
   const [confirm, setConfirm] = useState(false)
   const [values, setValues] = useState({})
-  const [section, setSection] = useState(false as false | string)
+  const [section, setSection] = useState(false)
 
   const { data, loading, error } = useQuery(query)
 
