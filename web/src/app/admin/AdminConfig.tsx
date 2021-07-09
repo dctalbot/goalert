@@ -60,7 +60,6 @@ const useStyles = makeStyles((theme) => ({
     flexBasis: '33.33%',
     flexShrink: 0,
   },
-
   secondaryHeading: {
     fontSize: theme.typography.pxToRem(15),
     color: theme.palette.text.secondary,
@@ -87,7 +86,7 @@ export default function AdminConfig(): JSX.Element {
   const classes = useStyles()
   const [confirm, setConfirm] = useState(false)
   const [values, setValues] = useState({})
-  const [section, setSection] = useState(false)
+  const [section, setSection] = useState(false as false | string)
 
   const { data, loading, error } = useQuery(query)
 
