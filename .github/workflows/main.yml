@@ -6,8 +6,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: reviewdog/action-eslint@v1
+      - uses: actions/setup-node@v2
         with:
-          reporter: github-pr-review
-          level: warning
-          fail_on_error: true
+          node-version: '14'
+      - run: yarn install
+      - run: yarn run lint
