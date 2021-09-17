@@ -28,9 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - name: get-golang-version
-      run: |
-        echo "GO_VERSION=$(grep 'go ' go.mod -m 1 | awk '{print $2}')" >> $GITHUB_ENV
+      - name: Set golang version
+        run: |
+          echo "GO_VERSION=$(grep 'go ' go.mod -m 1 | awk '{print $2}')" >> $GITHUB_ENV
       - uses: reviewdog/action-golangci-lint@v2
         with:
           reporter: github-pr-review
