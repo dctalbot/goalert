@@ -1,6 +1,6 @@
-## Development Setup
+# Development Setup
 
-This guide assumes you have the commands `docker`, `go`, `node`, `yarn`, and `make` installed/available.
+This guide assumes you have the commands `docker`, `go` (>= 1.16), `node`, `yarn`, and `make` installed/available.
 
 ## Database (PostgreSQL)
 

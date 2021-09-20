@@ -12,12 +12,21 @@ import (
 )
 
 var logDir string
+var pidDir string
 
 func main() {
 	flag.StringVar(&logDir, "logs", "", "Directory to store copies of all logs. Overwritten on each start.")
 	file := flag.String("file", "-", "File to load config from.")
+	flag.StringVar(&pidDir, "pid", "", "Directory to store PID files in.")
 	flag.Parse()
 	log.SetFlags(log.Lshortfile)
+
+	if pidDir != "" {
+		err := os.MkdirAll(pidDir, 0755)
+		if err != nil {
+			log.Fatalln("ERROR:", err)
+		}
+	}
 
 	var tasks []Task
 
@@ -51,8 +60,8 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ch := make(chan os.Signal)
-	signal.Notify(ch, os.Interrupt)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, shutdownSignals...)
 	go func() {
 		<-ch
 		log.Println("Got signal, terminating.")

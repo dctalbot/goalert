@@ -1,8 +1,9 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestTwilioSMSReplyCode checks that reply codes work properly.
@@ -19,8 +20,7 @@ func TestTwilioSMSReplyCode(t *testing.T) {
 
 	insert into user_notification_rules (user_id, contact_method_id, delay_minutes) 
 	values
-		({{uuid "user"}}, {{uuid "cm1"}}, 0),
-		({{uuid "user"}}, {{uuid "cm1"}}, 1);
+		({{uuid "user"}}, {{uuid "cm1"}}, 0);
 
 	insert into escalation_policies (id, name) 
 	values
@@ -41,32 +41,28 @@ func TestTwilioSMSReplyCode(t *testing.T) {
 	h := harness.NewHarness(t, sql, "ids-to-uuids")
 	defer h.Close()
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 
 	h.CreateAlert(h.UUID("sid"), "test1")
-	d1.ExpectSMS("test1", "1c", "1a").ThenReply("1a")
-	d1.ExpectSMS("Acknowledged", "#1")
-
-	tw.WaitAndAssert()
+	d1.ExpectSMS("test1", "1c", "1a").
+		ThenReply("1a").
+		ThenExpect("Acknowledged", "#1")
 
 	h.CreateAlert(h.UUID("sid"), "test2")
-	d1.ExpectSMS("test2", "2c", "2a").ThenReply("1a") // ack again
-	d1.ExpectSMS("already", "ack").ThenReply("'1c'")  // then close
-	d1.ExpectSMS("Closed", "#1")
-
-	tw.WaitAndAssert()
+	d1.ExpectSMS("test2", "2c", "2a").
+		ThenReply("1a"). // ack again
+		ThenExpect("already", "ack").
+		ThenReply("'1c'").
+		ThenExpect("Closed", "#1")
 
 	h.CreateAlert(h.UUID("sid"), "test3")
-	d1.ExpectSMS("test3", "1c", "1a").ThenReply("1 a") // 1 was re-used for alert #3
-
-	tw.WaitAndAssert()
-
-	d1.ExpectSMS("Ack", "#3")
-
-	tw.WaitAndAssert()
+	d1.ExpectSMS("test3", "1c", "1a").
+		ThenReply("1 a").
+		ThenExpect("Ack", "#3")
 
 	h.CreateAlert(h.UUID("sid"), "test4")
-	d1.ExpectSMS("test4", "3c", "3a").ThenReply("close 4") // old method 'close alertID' still works
-	d1.ExpectSMS("Closed", "#4")
+	d1.ExpectSMS("test4", "3c", "3a").
+		ThenReply("close 4").
+		ThenExpect("Closed", "#4")
 }

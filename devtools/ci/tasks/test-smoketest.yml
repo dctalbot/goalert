@@ -1,6 +1,4 @@
 platform: linux
-params:
-  DB_URL: ""
 caches:
   - path: ../../../go/pkg
   - path: ../../../root/.cache
@@ -10,7 +8,7 @@ outputs:
   - name: debug
 image_resource:
   type: registry-image
-  source: { repository: goalert/build-env }
+  source: { repository: goalert/build-env, tag: go1.16.4-postgres13 }
 run:
   path: sh
   dir: goalert

@@ -1,9 +1,10 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 /*
@@ -41,14 +42,14 @@ func TestAddRules(t *testing.T) {
 	insert into user_notification_rules (user_id, contact_method_id, delay_minutes) 
 	values
 		({{uuid "uid"}}, {{uuid "cid"}}, 0),
-		({{uuid "uid"}}, {{uuid "cid"}}, 2);
+		({{uuid "uid"}}, {{uuid "cid"}}, 60);
 
 	insert into escalation_policies (id, name, repeat) 
 	values 
 		({{uuid "eid"}}, 'esc policy', -1);
 	insert into escalation_policy_steps (id, escalation_policy_id, delay) 
 	values 
-		({{uuid "esid"}}, {{uuid "eid"}}, 60);
+		({{uuid "esid"}}, {{uuid "eid"}}, 300);
 
 	insert into escalation_policy_actions (escalation_policy_step_id, user_id) 
 	values
@@ -66,33 +67,30 @@ func TestAddRules(t *testing.T) {
 	h := harness.NewHarness(t, sql, "ids-to-uuids")
 	defer h.Close()
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d := tw.Device(h.Phone("1"))
-	d.ExpectSMS("testing")
-	tw.WaitAndAssert()
+	d.ExpectSMS("testing") // immediate rule
 
-	h.FastForward(time.Minute)
+	h.FastForward(35 * time.Minute)
+	h.Trigger() // ensure engine cycles before adding 30-min rule
 
 	// ADD RULES
-	h.AddNotificationRule(h.UUID("uid"), h.UUID("cid"), 1)
-	h.AddNotificationRule(h.UUID("uid"), h.UUID("cid"), 3)
+	h.AddNotificationRule(h.UUID("uid"), h.UUID("cid"), 30)
+	h.AddNotificationRule(h.UUID("uid"), h.UUID("cid"), 90)
 
-	h.FastForward(time.Minute)
+	h.FastForward(30 * time.Minute)
 
-	d.ExpectSMS("testing")
-	tw.WaitAndAssert()
+	d.ExpectSMS("testing") // 60-min rule (30-min skipped)
 
-	h.FastForward(time.Minute)
+	h.FastForward(30 * time.Minute)
 
-	d.ExpectSMS("testing")
-	tw.WaitAndAssert()
+	d.ExpectSMS("testing") // 90-min rule
 
 	h.Escalate(1, 0)
 
-	d.ExpectSMS("testing")
-	tw.WaitAndAssert()
+	d.ExpectSMS("testing") // immediate rule
 
-	h.FastForward(time.Minute)
+	h.FastForward(30 * time.Minute)
 
-	d.ExpectSMS("testing")
+	d.ExpectSMS("testing") // 30-min rule
 }

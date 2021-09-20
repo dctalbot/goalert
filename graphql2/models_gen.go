@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"github.com/target/goalert/alert"
-	"github.com/target/goalert/alert/log"
+	alertlog "github.com/target/goalert/alert/log"
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/escalation"
 	"github.com/target/goalert/label"
+	"github.com/target/goalert/limit"
 	"github.com/target/goalert/notification/slack"
 	"github.com/target/goalert/override"
 	"github.com/target/goalert/schedule"
@@ -21,16 +22,17 @@ import (
 	"github.com/target/goalert/service"
 	"github.com/target/goalert/user"
 	"github.com/target/goalert/user/contactmethod"
+	"github.com/target/goalert/util/timeutil"
 )
 
 type AlertConnection struct {
 	Nodes    []alert.Alert `json:"nodes"`
-	PageInfo PageInfo      `json:"pageInfo"`
+	PageInfo *PageInfo     `json:"pageInfo"`
 }
 
 type AlertLogEntryConnection struct {
 	Nodes    []alertlog.Entry `json:"nodes"`
-	PageInfo PageInfo         `json:"pageInfo"`
+	PageInfo *PageInfo        `json:"pageInfo"`
 }
 
 type AlertRecentEventsOptions struct {
@@ -39,18 +41,41 @@ type AlertRecentEventsOptions struct {
 }
 
 type AlertSearchOptions struct {
-	FilterByStatus    []AlertStatus `json:"filterByStatus"`
-	FilterByServiceID []string      `json:"filterByServiceID"`
-	Search            *string       `json:"search"`
-	First             *int          `json:"first"`
-	After             *string       `json:"after"`
-	FavoritesOnly     *bool         `json:"favoritesOnly"`
-	Omit              []int         `json:"omit"`
+	FilterByStatus    []AlertStatus    `json:"filterByStatus"`
+	FilterByServiceID []string         `json:"filterByServiceID"`
+	Search            *string          `json:"search"`
+	First             *int             `json:"first"`
+	After             *string          `json:"after"`
+	FavoritesOnly     *bool            `json:"favoritesOnly"`
+	IncludeNotified   *bool            `json:"includeNotified"`
+	Omit              []int            `json:"omit"`
+	Sort              *AlertSearchSort `json:"sort"`
+	CreatedBefore     *time.Time       `json:"createdBefore"`
+	NotCreatedBefore  *time.Time       `json:"notCreatedBefore"`
 }
 
 type AuthSubjectConnection struct {
 	Nodes    []user.AuthSubject `json:"nodes"`
-	PageInfo PageInfo           `json:"pageInfo"`
+	PageInfo *PageInfo          `json:"pageInfo"`
+}
+
+type CalcRotationHandoffTimesInput struct {
+	Handoff          time.Time  `json:"handoff"`
+	From             *time.Time `json:"from"`
+	TimeZone         string     `json:"timeZone"`
+	ShiftLengthHours int        `json:"shiftLengthHours"`
+	Count            int        `json:"count"`
+}
+
+type ClearTemporarySchedulesInput struct {
+	ScheduleID string    `json:"scheduleID"`
+	Start      time.Time `json:"start"`
+	End        time.Time `json:"end"`
+}
+
+type ConfigHint struct {
+	ID    string `json:"id"`
+	Value string `json:"value"`
 }
 
 type ConfigValue struct {
@@ -70,12 +95,14 @@ type CreateAlertInput struct {
 	Summary   string  `json:"summary"`
 	Details   *string `json:"details"`
 	ServiceID string  `json:"serviceID"`
+	Sanitize  *bool   `json:"sanitize"`
 }
 
 type CreateEscalationPolicyInput struct {
 	Name        string                            `json:"name"`
 	Description *string                           `json:"description"`
 	Repeat      *int                              `json:"repeat"`
+	Favorite    *bool                             `json:"favorite"`
 	Steps       []CreateEscalationPolicyStepInput `json:"steps"`
 }
 
@@ -111,11 +138,12 @@ type CreateRotationInput struct {
 }
 
 type CreateScheduleInput struct {
-	Name        string                `json:"name"`
-	Description *string               `json:"description"`
-	TimeZone    string                `json:"timeZone"`
-	Favorite    *bool                 `json:"favorite"`
-	Targets     []ScheduleTargetInput `json:"targets"`
+	Name             string                    `json:"name"`
+	Description      *string                   `json:"description"`
+	TimeZone         string                    `json:"timeZone"`
+	Favorite         *bool                     `json:"favorite"`
+	Targets          []ScheduleTargetInput     `json:"targets"`
+	NewUserOverrides []CreateUserOverrideInput `json:"newUserOverrides"`
 }
 
 type CreateServiceInput struct {
@@ -129,12 +157,27 @@ type CreateServiceInput struct {
 	NewHeartbeatMonitors []CreateHeartbeatMonitorInput `json:"newHeartbeatMonitors"`
 }
 
+type CreateUserCalendarSubscriptionInput struct {
+	Name            string `json:"name"`
+	ReminderMinutes []int  `json:"reminderMinutes"`
+	ScheduleID      string `json:"scheduleID"`
+	Disabled        *bool  `json:"disabled"`
+}
+
 type CreateUserContactMethodInput struct {
 	UserID                  string                           `json:"userID"`
 	Type                    contactmethod.Type               `json:"type"`
 	Name                    string                           `json:"name"`
 	Value                   string                           `json:"value"`
 	NewUserNotificationRule *CreateUserNotificationRuleInput `json:"newUserNotificationRule"`
+}
+
+type CreateUserInput struct {
+	Username string    `json:"username"`
+	Password string    `json:"password"`
+	Name     *string   `json:"name"`
+	Email    *string   `json:"email"`
+	Role     *UserRole `json:"role"`
 }
 
 type CreateUserNotificationRuleInput struct {
@@ -144,28 +187,53 @@ type CreateUserNotificationRuleInput struct {
 }
 
 type CreateUserOverrideInput struct {
-	ScheduleID   string    `json:"scheduleID"`
+	ScheduleID   *string   `json:"scheduleID"`
 	Start        time.Time `json:"start"`
 	End          time.Time `json:"end"`
 	AddUserID    *string   `json:"addUserID"`
 	RemoveUserID *string   `json:"removeUserID"`
 }
 
+type DebugCarrierInfoInput struct {
+	Number string `json:"number"`
+}
+
+type DebugSendSMSInfo struct {
+	ID          string `json:"id"`
+	ProviderURL string `json:"providerURL"`
+	FromNumber  string `json:"fromNumber"`
+}
+
+type DebugSendSMSInput struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Body string `json:"body"`
+}
+
 type EscalationPolicyConnection struct {
 	Nodes    []escalation.Policy `json:"nodes"`
-	PageInfo PageInfo            `json:"pageInfo"`
+	PageInfo *PageInfo           `json:"pageInfo"`
 }
 
 type EscalationPolicySearchOptions struct {
-	First  *int     `json:"first"`
-	After  *string  `json:"after"`
-	Search *string  `json:"search"`
-	Omit   []string `json:"omit"`
+	First          *int     `json:"first"`
+	After          *string  `json:"after"`
+	Search         *string  `json:"search"`
+	Omit           []string `json:"omit"`
+	FavoritesOnly  *bool    `json:"favoritesOnly"`
+	FavoritesFirst *bool    `json:"favoritesFirst"`
 }
 
 type LabelConnection struct {
 	Nodes    []label.Label `json:"nodes"`
-	PageInfo PageInfo      `json:"pageInfo"`
+	PageInfo *PageInfo     `json:"pageInfo"`
+}
+
+type LabelKeySearchOptions struct {
+	First  *int     `json:"first"`
+	After  *string  `json:"after"`
+	Search *string  `json:"search"`
+	Omit   []string `json:"omit"`
 }
 
 type LabelSearchOptions struct {
@@ -176,14 +244,37 @@ type LabelSearchOptions struct {
 	Omit       []string `json:"omit"`
 }
 
+type LabelValueSearchOptions struct {
+	Key    string   `json:"key"`
+	First  *int     `json:"first"`
+	After  *string  `json:"after"`
+	Search *string  `json:"search"`
+	Omit   []string `json:"omit"`
+}
+
+type NotificationState struct {
+	Details           string              `json:"details"`
+	Status            *NotificationStatus `json:"status"`
+	FormattedSrcValue string              `json:"formattedSrcValue"`
+}
+
 type PageInfo struct {
 	EndCursor   *string `json:"endCursor"`
 	HasNextPage bool    `json:"hasNextPage"`
 }
 
+type PhoneNumberInfo struct {
+	ID          string `json:"id"`
+	CountryCode string `json:"countryCode"`
+	RegionCode  string `json:"regionCode"`
+	Formatted   string `json:"formatted"`
+	Valid       bool   `json:"valid"`
+	Error       string `json:"error"`
+}
+
 type RotationConnection struct {
 	Nodes    []rotation.Rotation `json:"nodes"`
-	PageInfo PageInfo            `json:"pageInfo"`
+	PageInfo *PageInfo           `json:"pageInfo"`
 }
 
 type RotationSearchOptions struct {
@@ -197,14 +288,14 @@ type RotationSearchOptions struct {
 
 type ScheduleConnection struct {
 	Nodes    []schedule.Schedule `json:"nodes"`
-	PageInfo PageInfo            `json:"pageInfo"`
+	PageInfo *PageInfo           `json:"pageInfo"`
 }
 
 type ScheduleRuleInput struct {
-	ID            *string     `json:"id"`
-	Start         *rule.Clock `json:"start"`
-	End           *rule.Clock `json:"end"`
-	WeekdayFilter []bool      `json:"weekdayFilter"`
+	ID            *string                 `json:"id"`
+	Start         *timeutil.Clock         `json:"start"`
+	End           *timeutil.Clock         `json:"end"`
+	WeekdayFilter *timeutil.WeekdayFilter `json:"weekdayFilter"`
 }
 
 type ScheduleSearchOptions struct {
@@ -217,9 +308,9 @@ type ScheduleSearchOptions struct {
 }
 
 type ScheduleTarget struct {
-	ScheduleID string               `json:"scheduleID"`
-	Target     assignment.RawTarget `json:"target"`
-	Rules      []rule.Rule          `json:"rules"`
+	ScheduleID string                `json:"scheduleID"`
+	Target     *assignment.RawTarget `json:"target"`
+	Rules      []rule.Rule           `json:"rules"`
 }
 
 type ScheduleTargetInput struct {
@@ -235,7 +326,7 @@ type SendContactMethodVerificationInput struct {
 
 type ServiceConnection struct {
 	Nodes    []service.Service `json:"nodes"`
-	PageInfo PageInfo          `json:"pageInfo"`
+	PageInfo *PageInfo         `json:"pageInfo"`
 }
 
 type ServiceSearchOptions struct {
@@ -248,8 +339,8 @@ type ServiceSearchOptions struct {
 }
 
 type SetFavoriteInput struct {
-	Target   assignment.RawTarget `json:"target"`
-	Favorite bool                 `json:"favorite"`
+	Target   *assignment.RawTarget `json:"target"`
+	Favorite bool                  `json:"favorite"`
 }
 
 type SetLabelInput struct {
@@ -258,9 +349,21 @@ type SetLabelInput struct {
 	Value  string                `json:"value"`
 }
 
+type SetScheduleOnCallNotificationRulesInput struct {
+	ScheduleID string                        `json:"scheduleID"`
+	Rules      []OnCallNotificationRuleInput `json:"rules"`
+}
+
+type SetTemporaryScheduleInput struct {
+	ScheduleID string                `json:"scheduleID"`
+	Start      time.Time             `json:"start"`
+	End        time.Time             `json:"end"`
+	Shifts     []schedule.FixedShift `json:"shifts"`
+}
+
 type SlackChannelConnection struct {
 	Nodes    []slack.Channel `json:"nodes"`
-	PageInfo PageInfo        `json:"pageInfo"`
+	PageInfo *PageInfo       `json:"pageInfo"`
 }
 
 type SlackChannelSearchOptions struct {
@@ -270,13 +373,29 @@ type SlackChannelSearchOptions struct {
 	Omit   []string `json:"omit"`
 }
 
+type StringConnection struct {
+	Nodes    []string  `json:"nodes"`
+	PageInfo *PageInfo `json:"pageInfo"`
+}
+
+type SystemLimit struct {
+	ID          limit.ID `json:"id"`
+	Description string   `json:"description"`
+	Value       int      `json:"value"`
+}
+
+type SystemLimitInput struct {
+	ID    limit.ID `json:"id"`
+	Value int      `json:"value"`
+}
+
 type TimeZone struct {
 	ID string `json:"id"`
 }
 
 type TimeZoneConnection struct {
 	Nodes    []TimeZone `json:"nodes"`
-	PageInfo PageInfo   `json:"pageInfo"`
+	PageInfo *PageInfo  `json:"pageInfo"`
 }
 
 type TimeZoneSearchOptions struct {
@@ -284,6 +403,11 @@ type TimeZoneSearchOptions struct {
 	After  *string  `json:"after"`
 	Search *string  `json:"search"`
 	Omit   []string `json:"omit"`
+}
+
+type UpdateAlertsByServiceInput struct {
+	ServiceID string      `json:"serviceID"`
+	NewStatus AlertStatus `json:"newStatus"`
 }
 
 type UpdateAlertsInput struct {
@@ -337,6 +461,13 @@ type UpdateServiceInput struct {
 	EscalationPolicyID *string `json:"escalationPolicyID"`
 }
 
+type UpdateUserCalendarSubscriptionInput struct {
+	ID              string  `json:"id"`
+	Name            *string `json:"name"`
+	ReminderMinutes []int   `json:"reminderMinutes"`
+	Disabled        *bool   `json:"disabled"`
+}
+
 type UpdateUserContactMethodInput struct {
 	ID    string  `json:"id"`
 	Name  *string `json:"name"`
@@ -361,12 +492,12 @@ type UpdateUserOverrideInput struct {
 
 type UserConnection struct {
 	Nodes    []user.User `json:"nodes"`
-	PageInfo PageInfo    `json:"pageInfo"`
+	PageInfo *PageInfo   `json:"pageInfo"`
 }
 
 type UserOverrideConnection struct {
 	Nodes    []override.UserOverride `json:"nodes"`
-	PageInfo PageInfo                `json:"pageInfo"`
+	PageInfo *PageInfo               `json:"pageInfo"`
 }
 
 type UserOverrideSearchOptions struct {
@@ -382,15 +513,60 @@ type UserOverrideSearchOptions struct {
 }
 
 type UserSearchOptions struct {
-	First  *int     `json:"first"`
-	After  *string  `json:"after"`
-	Search *string  `json:"search"`
-	Omit   []string `json:"omit"`
+	First   *int                `json:"first"`
+	After   *string             `json:"after"`
+	Search  *string             `json:"search"`
+	Omit    []string            `json:"omit"`
+	CMValue *string             `json:"CMValue"`
+	CMType  *contactmethod.Type `json:"CMType"`
 }
 
 type VerifyContactMethodInput struct {
 	ContactMethodID string `json:"contactMethodID"`
 	Code            int    `json:"code"`
+}
+
+type AlertSearchSort string
+
+const (
+	AlertSearchSortStatusID      AlertSearchSort = "statusID"
+	AlertSearchSortDateID        AlertSearchSort = "dateID"
+	AlertSearchSortDateIDReverse AlertSearchSort = "dateIDReverse"
+)
+
+var AllAlertSearchSort = []AlertSearchSort{
+	AlertSearchSortStatusID,
+	AlertSearchSortDateID,
+	AlertSearchSortDateIDReverse,
+}
+
+func (e AlertSearchSort) IsValid() bool {
+	switch e {
+	case AlertSearchSortStatusID, AlertSearchSortDateID, AlertSearchSortDateIDReverse:
+		return true
+	}
+	return false
+}
+
+func (e AlertSearchSort) String() string {
+	return string(e)
+}
+
+func (e *AlertSearchSort) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = AlertSearchSort(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid AlertSearchSort", str)
+	}
+	return nil
+}
+
+func (e AlertSearchSort) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 
 type AlertStatus string
@@ -484,22 +660,24 @@ func (e ConfigType) MarshalGQL(w io.Writer) {
 type IntegrationKeyType string
 
 const (
-	IntegrationKeyTypeGeneric  IntegrationKeyType = "generic"
-	IntegrationKeyTypeGrafana  IntegrationKeyType = "grafana"
-	IntegrationKeyTypeSite24x7 IntegrationKeyType = "site24x7"
-	IntegrationKeyTypeEmail    IntegrationKeyType = "email"
+	IntegrationKeyTypeGeneric                IntegrationKeyType = "generic"
+	IntegrationKeyTypeGrafana                IntegrationKeyType = "grafana"
+	IntegrationKeyTypeSite24x7               IntegrationKeyType = "site24x7"
+	IntegrationKeyTypePrometheusAlertmanager IntegrationKeyType = "prometheusAlertmanager"
+	IntegrationKeyTypeEmail                  IntegrationKeyType = "email"
 )
 
 var AllIntegrationKeyType = []IntegrationKeyType{
 	IntegrationKeyTypeGeneric,
 	IntegrationKeyTypeGrafana,
 	IntegrationKeyTypeSite24x7,
+	IntegrationKeyTypePrometheusAlertmanager,
 	IntegrationKeyTypeEmail,
 }
 
 func (e IntegrationKeyType) IsValid() bool {
 	switch e {
-	case IntegrationKeyTypeGeneric, IntegrationKeyTypeGrafana, IntegrationKeyTypeSite24x7, IntegrationKeyTypeEmail:
+	case IntegrationKeyTypeGeneric, IntegrationKeyTypeGrafana, IntegrationKeyTypeSite24x7, IntegrationKeyTypePrometheusAlertmanager, IntegrationKeyTypeEmail:
 		return true
 	}
 	return false
@@ -523,6 +701,49 @@ func (e *IntegrationKeyType) UnmarshalGQL(v interface{}) error {
 }
 
 func (e IntegrationKeyType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type NotificationStatus string
+
+const (
+	NotificationStatusOk    NotificationStatus = "OK"
+	NotificationStatusWarn  NotificationStatus = "WARN"
+	NotificationStatusError NotificationStatus = "ERROR"
+)
+
+var AllNotificationStatus = []NotificationStatus{
+	NotificationStatusOk,
+	NotificationStatusWarn,
+	NotificationStatusError,
+}
+
+func (e NotificationStatus) IsValid() bool {
+	switch e {
+	case NotificationStatusOk, NotificationStatusWarn, NotificationStatusError:
+		return true
+	}
+	return false
+}
+
+func (e NotificationStatus) String() string {
+	return string(e)
+}
+
+func (e *NotificationStatus) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = NotificationStatus(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid NotificationStatus", str)
+	}
+	return nil
+}
+
+func (e NotificationStatus) MarshalGQL(w io.Writer) {
 	fmt.Fprint(w, strconv.Quote(e.String()))
 }
 

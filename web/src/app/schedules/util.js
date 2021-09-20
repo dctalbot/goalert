@@ -10,6 +10,34 @@ export const days = [
   'Saturday',
 ]
 
+// dstWeekOffset will return dt forward or backward a week
+// if `dt.offset` does not match the `expectedOffset`.
+function dstWeekOffset(expectedOffset, dt) {
+  if (dt.offset === expectedOffset) return dt
+
+  dt = dt.minus({ weeks: 1 })
+  if (dt.offset === expectedOffset) return dt
+
+  return dt.plus({ weeks: 2 })
+}
+
+export function parseClock(s, zone) {
+  const dt = DateTime.fromObject({
+    hours: parseInt(s.split(':')[0], 10),
+    minutes: parseInt(s.split(':')[1], 10),
+    weekday: 7, // sunday
+    zone,
+  })
+
+  return dstWeekOffset(DateTime.utc().setZone(zone).offset, dt)
+}
+
+export function formatClock(dt) {
+  return `${dt.hour.toString().padStart(2, '0')}:${dt.minute
+    .toString()
+    .padStart(2, '0')}`
+}
+
 // Shifts a weekdayFilter so that it matches the luxon day n
 //
 // Default is 7 (Sunday)
@@ -30,13 +58,26 @@ export function mapRuleTZ(fromTZ, toTZ, rule) {
   }
 }
 
+// gqlClockTimeToISO will return an ISO timestamp representing
+// the given GraphQL ClockTime value at the current date in the
+// provided time zone.
+export function gqlClockTimeToISO(time, zone) {
+  return DateTime.fromFormat(time, 'HH:mm', { zone }).toUTC().toISO()
+}
+
+// isoToGQLClockTime will return a GraphQL ClockTime value for
+// the given ISO timestamp, with respect to the provided time zone.
+export function isoToGQLClockTime(timestamp, zone) {
+  return DateTime.fromISO(timestamp, { zone }).toFormat('HH:mm')
+}
+
 export function weekdaySummary(filter) {
-  const bin = filter.map(f => (f ? '1' : '0')).join('')
+  const bin = filter.map((f) => (f ? '1' : '0')).join('')
   switch (bin) {
     case '1000001':
-      return 'Weekends'
+      return 'weekends'
     case '0000000':
-      return 'Never'
+      return 'never'
     case '0111110':
       return 'M—F'
     case '0111111':
@@ -44,14 +85,14 @@ export function weekdaySummary(filter) {
     case '1111110':
       return 'M—F and Sun'
     case '1111111':
-      return 'Everyday'
+      return 'every day'
   }
 
-  let d = []
+  const d = []
   let chain = []
   const flush = () => {
     if (chain.length < 3) {
-      chain.forEach(day => d.push(day.slice(0, 3)))
+      chain.forEach((day) => d.push(day.slice(0, 3)))
       chain = []
       return
     }
@@ -70,35 +111,22 @@ export function weekdaySummary(filter) {
   return d.join(', ')
 }
 
-export function parseClock(s, zone) {
-  return DateTime.fromObject({
-    hours: parseInt(s.split(':')[0], 10),
-    minutes: parseInt(s.split(':')[1], 10),
-    weekday: 7, // sunday
-    zone,
-  })
-}
-
-export function formatClock(dt) {
-  return `${dt.hour
-    .toString()
-    .padStart(2, '0')}:${dt.minute.toString().padStart(2, '0')}`
-}
-
 export function ruleSummary(rules, scheduleZone, displayZone) {
-  const everyDay = r => !r.weekdayFilter.some(w => !w) && r.start === r.end
+  const everyDay = (r) => !r.weekdayFilter.some((w) => !w) && r.start === r.end
 
-  rules = rules.filter(r => r.weekdayFilter.some(w => w)) // ignore disabled
+  rules = rules.filter((r) => r.weekdayFilter.some((w) => w)) // ignore disabled
   if (rules.length === 0) return 'Never'
   if (rules.some(everyDay)) return 'Always'
 
-  const getTime = str => parseClock(str, scheduleZone).setZone(displayZone)
+  const getTime = (str) => parseClock(str, scheduleZone).setZone(displayZone)
 
   return rules
-    .map(r => {
+    .map((r) => {
       const start = getTime(r.start)
       const weekdayFilter = alignWeekdayFilter(start.weekday, r.weekdayFilter)
-      return `${weekdaySummary(weekdayFilter)} from ${start.toLocaleString(
+      let summary = weekdaySummary(weekdayFilter)
+      summary = summary[0].toUpperCase() + summary.slice(1)
+      return `${summary} from ${start.toLocaleString(
         DateTime.TIME_SIMPLE,
       )} to ${getTime(r.end).toLocaleString(DateTime.TIME_SIMPLE)} `
     })
@@ -129,7 +157,7 @@ export function mapOverrideUserError(conflictingOverride, value, zone) {
   const isReplace =
     conflictingOverride.addUser && conflictingOverride.removeUser
 
-  const replaceMsg = add =>
+  const replaceMsg = (add) =>
     add
       ? `replacing ${conflictingOverride.removeUser.name}`
       : `replaced by ${conflictingOverride.addUser.name}`

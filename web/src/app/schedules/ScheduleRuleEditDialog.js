@@ -1,17 +1,19 @@
 import React from 'react'
+import { gql } from '@apollo/client'
 import p from 'prop-types'
-import { Mutation } from 'react-apollo'
+import { Mutation } from '@apollo/client/react/components'
 import FormDialog from '../dialogs/FormDialog'
 import ScheduleRuleForm from './ScheduleRuleForm'
 import { fieldErrors, nonFieldErrors } from '../util/errutil'
-import gql from 'graphql-tag'
-import { startCase, pick } from 'lodash-es'
+import _ from 'lodash'
 import Query from '../util/Query'
+import { gqlClockTimeToISO, isoToGQLClockTime } from './util'
 
 const query = gql`
-  query($id: ID!, $tgt: TargetInput!) {
+  query ($id: ID!, $tgt: TargetInput!) {
     schedule(id: $id) {
       id
+      timeZone
       target(input: $tgt) {
         rules {
           id
@@ -25,7 +27,7 @@ const query = gql`
 `
 
 const mutation = gql`
-  mutation($input: ScheduleTargetInput!) {
+  mutation ($input: ScheduleTargetInput!) {
     updateScheduleTarget(input: $input)
   }
 `
@@ -56,35 +58,36 @@ export default class ScheduleRuleEditDialog extends React.Component {
         query={query}
         variables={{ id: this.props.scheduleID, tgt: this.props.target }}
         noPoll
-        fetchPolicy={'network-only'}
-        render={({ data }) => this.renderMutation(data.schedule.target)}
+        fetchPolicy='network-only'
+        render={({ data }) =>
+          this.renderMutation(data.schedule.target, data.schedule.timeZone)
+        }
       />
     )
   }
 
-  renderMutation(data) {
+  renderMutation(data, zone) {
     return (
-      <Mutation
-        mutation={mutation}
-        onCompleted={this.props.onClose}
-        refetchQueries={['scheduleRules']}
-      >
-        {(commit, status) => this.renderDialog(data, commit, status)}
+      <Mutation mutation={mutation} onCompleted={this.props.onClose}>
+        {(commit, status) => this.renderDialog(data, commit, status, zone)}
       </Mutation>
     )
   }
 
-  renderDialog(data, commit, status) {
+  renderDialog(data, commit, status, zone) {
     const defaults = {
       targetID: this.props.target.id,
-      rules: data.rules.map(r =>
-        pick(r, ['id', 'start', 'end', 'weekdayFilter']),
-      ),
+      rules: data.rules.map((r) => ({
+        id: r.id,
+        weekdayFilter: r.weekdayFilter,
+        start: gqlClockTimeToISO(r.start, zone),
+        end: gqlClockTimeToISO(r.end, zone),
+      })),
     }
     return (
       <FormDialog
         onClose={this.props.onClose}
-        title={`Edit Rules for ${startCase(this.props.target.type)}`}
+        title={`Edit Rules for ${_.startCase(this.props.target.type)}`}
         errors={nonFieldErrors(status.error)}
         maxWidth='md'
         onSubmit={() => {
@@ -99,7 +102,11 @@ export default class ScheduleRuleEditDialog extends React.Component {
                 target: this.props.target,
                 scheduleID: this.props.scheduleID,
 
-                rules: this.state.value.rules,
+                rules: this.state.value.rules.map((r) => ({
+                  ...r,
+                  start: isoToGQLClockTime(r.start, zone),
+                  end: isoToGQLClockTime(r.end, zone),
+                })),
               },
             },
           })
@@ -112,7 +119,7 @@ export default class ScheduleRuleEditDialog extends React.Component {
             disabled={status.loading}
             errors={fieldErrors(status.error)}
             value={this.state.value || defaults}
-            onChange={value => this.setState({ value })}
+            onChange={(value) => this.setState({ value })}
           />
         }
       />

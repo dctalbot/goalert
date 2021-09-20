@@ -19,7 +19,7 @@ func (app *App) Run(ctx context.Context) error {
 
 func (app *App) _Run(ctx context.Context) error {
 	go func() {
-		err := app.engine.Run(ctx)
+		err := app.Engine.Run(ctx)
 		if err != nil {
 			log.Log(ctx, err)
 		}
@@ -27,9 +27,18 @@ func (app *App) _Run(ctx context.Context) error {
 
 	eventCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	err := app.listenEvents(eventCtx)
+	eventDoneCh, err := app.listenEvents(eventCtx)
 	if err != nil {
 		return err
+	}
+
+	if app.sysAPISrv != nil {
+		log.Logf(log.WithField(context.TODO(), "address", app.sysAPIL.Addr().String()), "System API server started.")
+		go func() {
+			if err := app.sysAPISrv.Serve(app.sysAPIL); err != nil {
+				log.Log(ctx, err)
+			}
+		}()
 	}
 
 	log.Logf(
@@ -40,9 +49,16 @@ func (app *App) _Run(ctx context.Context) error {
 		"Listening.",
 	)
 	err = app.srv.Serve(app.l)
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return errors.Wrap(err, "serve HTTP")
 	}
+	if app.hSrv != nil {
+		app.hSrv.Resume()
+	}
 
+	select {
+	case <-eventDoneCh:
+	case <-ctx.Done():
+	}
 	return nil
 }

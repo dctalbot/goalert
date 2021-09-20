@@ -1,17 +1,18 @@
 import React from 'react'
 import p from 'prop-types'
 import Typography from '@material-ui/core/Typography'
-import { Switch, Route, Link } from 'react-router-dom'
-import withWidth, { isWidthUp } from '@material-ui/core/withWidth'
+import { Switch, Route } from 'react-router-dom'
+import { makeStyles } from '@material-ui/core/styles'
+import { isWidthUp } from '@material-ui/core/withWidth'
 import { ChevronRight } from '@material-ui/icons'
-import withStyles from '@material-ui/core/styles/withStyles'
-import gql from 'graphql-tag'
-import { Query } from 'react-apollo'
-import { startCase } from 'lodash-es'
-import { connect } from 'react-redux'
-import { absURLSelector } from '../../selectors/url'
+import { gql, useQuery } from '@apollo/client'
+import { startCase } from 'lodash'
+import AppLink from '../../util/AppLink'
+import useWidth from '../../util/useWidth'
+import { useConfigValue } from '../../util/RequireConfig'
+import { applicationName as appName } from '../../env'
 
-const styles = {
+const useStyles = makeStyles(() => ({
   backPage: {
     '&:hover': {
       cursor: 'pointer',
@@ -33,7 +34,7 @@ const styles = {
     flex: 1, // pushes toolbar actions to the right
     fontSize: '1.25rem',
   },
-}
+}))
 
 const mapSingular = {
   Schedules: 'Schedule',
@@ -45,7 +46,7 @@ const mapSingular = {
 
 const queries = {
   users: gql`
-    query($id: ID!) {
+    query ($id: ID!) {
       data: user(id: $id) {
         id
         name
@@ -53,7 +54,7 @@ const queries = {
     }
   `,
   services: gql`
-    query($id: ID!) {
+    query ($id: ID!) {
       data: service(id: $id) {
         id
         name
@@ -61,7 +62,7 @@ const queries = {
     }
   `,
   schedules: gql`
-    query($id: ID!) {
+    query ($id: ID!) {
       data: schedule(id: $id) {
         id
         name
@@ -69,7 +70,7 @@ const queries = {
     }
   `,
   'escalation-policies': gql`
-    query($id: ID!) {
+    query ($id: ID!) {
       data: escalationPolicy(id: $id) {
         id
         name
@@ -78,45 +79,31 @@ const queries = {
   `,
 }
 
-class NameLoader extends React.PureComponent {
-  static propTypes = {
-    fallback: p.string.isRequired,
-    id: p.string,
-    query: p.object,
-  }
-
-  render() {
-    if (!this.props.query || !this.props.id) return this.props.fallback
-    return (
-      <Query query={this.props.query} variables={{ id: this.props.id }}>
-        {({ data }) => {
-          if (!data || !data.data) {
-            return this.props.fallback
-          }
-
-          return data.data.name
-        }}
-      </Query>
-    )
-  }
+function NameLoader(props) {
+  const { data } = useQuery(props.query, {
+    variables: { id: props.id },
+    skip: !props.id,
+  })
+  return data?.data?.name ?? props.fallback
 }
 
-const mapStateToProps = state => {
-  return {
-    absURL: absURLSelector(state),
-  }
+NameLoader.propTypes = {
+  fallback: p.string.isRequired,
+  id: p.string,
+  query: p.object.isRequired,
 }
 
-@withWidth()
-@withStyles(styles)
-@connect(mapStateToProps)
-export default class ToolbarTitle extends React.Component {
-  renderTitle = title => {
-    document.title = `GoAlert - ${title}`
+function ToolbarTitle() {
+  const width = useWidth()
+  const classes = useStyles()
+  const [applicationName] = useConfigValue('General.ApplicationName')
+
+  const renderTitle = (title) => {
+    document.title = `${applicationName || appName} - ${title}`
 
     return (
       <Typography
-        className={this.props.classes.title}
+        className={classes.title}
         color='inherit'
         noWrap
         component='h1'
@@ -126,39 +113,7 @@ export default class ToolbarTitle extends React.Component {
     )
   }
 
-  renderSubPageTitle = ({ match }) => {
-    const sub = startCase(match.params.sub)
-
-    if (!isWidthUp('md', this.props.width)) {
-      // mobile, only render current title
-      return this.renderTitle(sub)
-    }
-    const query = queries[match.params.type]
-
-    return (
-      <div className={this.props.classes.div}>
-        <Typography
-          component={Link}
-          className={this.props.classes.backPage}
-          color='inherit'
-          noWrap
-          variant='h6'
-          to={this.props.absURL('..')}
-          replace
-        >
-          <NameLoader
-            id={match.params.id}
-            query={query}
-            fallback={this.detailsText(match)}
-          />
-        </Typography>
-        <ChevronRight />
-        {this.renderTitle(sub)}
-      </div>
-    )
-  }
-
-  detailsText = match => {
+  const detailsText = (match) => {
     const typeName = startCase(match.params.type)
     return (
       (mapSingular[typeName] || typeName) +
@@ -166,49 +121,85 @@ export default class ToolbarTitle extends React.Component {
     )
   }
 
-  renderDetailsPageTitle = ({ match }) => {
-    return this.renderTitle(this.detailsText(match))
-  }
+  const renderSubPageTitle = ({ match }) => {
+    const sub = startCase(match.params.sub)
 
-  renderTopLevelTitle = ({ match }) => {
-    return this.renderTitle(startCase(match.params.type))
-  }
+    if (!isWidthUp('md', width)) {
+      // mobile, only render current title
+      return renderTitle(sub)
+    }
+    const query = queries[match.params.type]
 
-  render() {
     return (
-      <Switch>
-        <Route
-          path='/:type(escalation-policies)/:id/:sub(services)'
-          render={this.renderSubPageTitle}
-        />
-        <Route
-          path='/:type(services)/:id/:sub(alerts|integration-keys|heartbeat-monitors|labels)'
-          render={this.renderSubPageTitle}
-        />
-        <Route
-          path='/:type(users)/:id/:sub(on-call-assignments)'
-          render={this.renderSubPageTitle}
-        />
-        <Route
-          path='/:type(profile)/:sub(on-call-assignments)'
-          render={this.renderSubPageTitle}
-        />
-        <Route
-          path='/:type(schedules)/:id/:sub(assignments|escalation-policies|overrides|shifts)'
-          render={this.renderSubPageTitle}
-        />
-        <Route
-          path='/:type(alerts|rotations|schedules|escalation-policies|services|users)/:id'
-          render={this.renderDetailsPageTitle}
-        />
-        <Route
-          path='/:type(alerts|rotations|schedules|escalation-policies|services|users|profile)'
-          render={this.renderTopLevelTitle}
-        />
-        <Route path='/wizard' render={() => this.renderTitle('Setup Wizard')} />
-        <Route path='/admin' render={() => this.renderTitle('Admin Page')} />
-        <Route path='/docs' render={() => this.renderTitle('Documentation')} />
-      </Switch>
+      <div className={classes.div}>
+        <Typography
+          component={AppLink}
+          className={classes.backPage}
+          color='inherit'
+          noWrap
+          variant='h6'
+          to='..'
+          replace
+        >
+          {query ? (
+            <NameLoader
+              id={match.params.id}
+              query={query}
+              fallback={detailsText(match)}
+            />
+          ) : (
+            detailsText(match)
+          )}
+        </Typography>
+        <ChevronRight />
+        {renderTitle(sub)}
+      </div>
     )
   }
+
+  const renderDetailsPageTitle = ({ match }) => {
+    return renderTitle(detailsText(match))
+  }
+
+  const renderTopLevelTitle = ({ match }) => {
+    return renderTitle(startCase(match.params.type))
+  }
+
+  return (
+    <Switch>
+      <Route
+        path='/:type(escalation-policies)/:id/:sub(services)'
+        render={renderSubPageTitle}
+      />
+      <Route
+        path='/:type(services)/:id/:sub(alerts|integration-keys|heartbeat-monitors|labels)'
+        render={renderSubPageTitle}
+      />
+      <Route
+        path='/:type(users)/:id/:sub(on-call-assignments|schedule-calendar-subscriptions|sessions)'
+        render={renderSubPageTitle}
+      />
+      <Route
+        path='/:type(profile)/:sub(on-call-assignments|schedule-calendar-subscriptions|sessions)'
+        render={renderSubPageTitle}
+      />
+      <Route
+        path='/:type(schedules)/:id/:sub(assignments|on-call-notifications|escalation-policies|overrides|shifts)'
+        render={renderSubPageTitle}
+      />
+      <Route
+        path='/:type(alerts|rotations|schedules|escalation-policies|services|users)/:id'
+        render={renderDetailsPageTitle}
+      />
+      <Route
+        path='/:type(alerts|rotations|schedules|escalation-policies|services|users|profile)'
+        render={renderTopLevelTitle}
+      />
+      <Route path='/wizard' render={() => renderTitle('Setup Wizard')} />
+      <Route path='/admin' render={() => renderTitle('Admin Page')} />
+      <Route path='/docs' render={() => renderTitle('Documentation')} />
+    </Switch>
+  )
 }
+
+export default ToolbarTitle

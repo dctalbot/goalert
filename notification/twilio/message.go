@@ -2,6 +2,7 @@ package twilio
 
 import (
 	"fmt"
+
 	"github.com/target/goalert/notification"
 )
 
@@ -68,15 +69,22 @@ type Message struct {
 	ErrorMessage *string
 }
 
-func (msg *Message) messageStatus(id string) *notification.MessageStatus {
+func (msg *Message) sentMessage() *notification.SentMessage {
+	stat := msg.messageStatus()
+
+	return &notification.SentMessage{
+		ExternalID:   msg.SID,
+		State:        stat.State,
+		StateDetails: stat.Details,
+		SrcValue:     msg.From,
+	}
+}
+func (msg *Message) messageStatus() *notification.Status {
 	if msg == nil {
 		return nil
 	}
 
-	status := &notification.MessageStatus{
-		ID:                id,
-		ProviderMessageID: msg.SID,
-	}
+	var status notification.Status
 	if msg.ErrorMessage != nil && msg.ErrorCode != nil {
 		status.Details = fmt.Sprintf("%s: [%d] %s", msg.Status, *msg.ErrorCode, *msg.ErrorMessage)
 	} else {
@@ -87,15 +95,15 @@ func (msg *Message) messageStatus(id string) *notification.MessageStatus {
 		if msg.ErrorCode != nil &&
 			(*msg.ErrorCode == 30008 || *msg.ErrorCode == 30001) {
 
-			status.State = notification.MessageStateFailedTemp
+			status.State = notification.StateFailedTemp
 		}
-		status.State = notification.MessageStateFailedPerm
+		status.State = notification.StateFailedPerm
 	case MessageStatusDelivered:
-		status.State = notification.MessageStateDelivered
+		status.State = notification.StateDelivered
 	case MessageStatusSent, MessageStatusUndelivered:
-		status.State = notification.MessageStateSent
+		status.State = notification.StateSent
 	default:
-		status.State = notification.MessageStateActive
+		status.State = notification.StateSending
 	}
-	return status
+	return &status
 }

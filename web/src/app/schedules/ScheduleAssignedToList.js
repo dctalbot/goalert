@@ -1,12 +1,12 @@
 import React from 'react'
-import p from 'prop-types'
-import gql from 'graphql-tag'
+import { gql } from '@apollo/client'
 import Query from '../util/Query'
 import FlatList from '../lists/FlatList'
 import Card from '@material-ui/core/Card'
+import p from 'prop-types'
 
 const query = gql`
-  query($id: ID!) {
+  query ($id: ID!) {
     schedule(id: $id) {
       id
       assignedTo {
@@ -18,24 +18,12 @@ const query = gql`
   }
 `
 
-export default class ScheduleAssignedToList extends React.PureComponent {
-  static propTypes = {
-    scheduleID: p.string.isRequired,
-  }
-  render() {
-    return (
-      <Query
-        query={query}
-        variables={{ id: this.props.scheduleID }}
-        render={this.renderList}
-      />
-    )
-  }
-  renderList({ data }) {
+export default function ScheduleAssignedToList(props) {
+  function renderList({ data }) {
     return (
       <Card style={{ width: '100%' }}>
         <FlatList
-          items={data.schedule.assignedTo.map(t => ({
+          items={data.schedule.assignedTo.map((t) => ({
             title: t.name,
             url: `/escalation-policies/${t.id}`,
           }))}
@@ -44,4 +32,16 @@ export default class ScheduleAssignedToList extends React.PureComponent {
       </Card>
     )
   }
+
+  return (
+    <Query
+      query={query}
+      variables={{ id: props.scheduleID }}
+      render={renderList}
+    />
+  )
+}
+
+ScheduleAssignedToList.propTypes = {
+  scheduleID: p.string.isRequired,
 }

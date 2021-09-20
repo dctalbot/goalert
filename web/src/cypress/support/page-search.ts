@@ -1,12 +1,5 @@
-declare namespace Cypress {
-  interface Chainable {
-    /** Enter a page-level search (from the top bar). Works in mobile and widescreen. */
-    pageSearch: typeof pageSearch
-  }
-}
-
-function pageSearch(s: string): Cypress.Chainable {
-  return cy.get('[data-cy=app-bar]').then(el => {
+export function pageSearch(s: string): Cypress.Chainable {
+  return cy.get('[data-cy=app-bar]').then((el) => {
     const format: 'mobile' | 'wide' = el.data('cy-format')
     expect(format, 'header format').to.be.oneOf(['mobile', 'wide'])
 
@@ -16,9 +9,10 @@ function pageSearch(s: string): Cypress.Chainable {
       }) // since we're running tests, it's ok if it is already open
     }
 
-    cy.get('[data-cy=app-bar] input')
+    cy.get('[data-cy=search-field] input')
       .type(`{selectall}${s}`)
       .should('have.value', s)
+      .should('have.focus')
   })
 }
 

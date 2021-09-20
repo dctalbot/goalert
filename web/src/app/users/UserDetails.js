@@ -1,9 +1,11 @@
 import React, { useState } from 'react'
+import { useQuery, gql } from '@apollo/client'
 import p from 'prop-types'
-import gql from 'graphql-tag'
+import Delete from '@material-ui/icons/Delete'
+import EditIcon from '@material-ui/icons/Edit'
 import DetailsPage from '../details/DetailsPage'
 import StatusUpdateNotification from './UserStatusUpdatePreference'
-import { UserAvatar } from '../util/avatar'
+import { UserAvatar } from '../util/avatars'
 import UserContactMethodList from './UserContactMethodList'
 import { AddAlarm, SettingsPhone } from '@material-ui/icons'
 import SpeedDial from '../util/SpeedDial'
@@ -11,21 +13,24 @@ import UserNotificationRuleList from './UserNotificationRuleList'
 import { Grid } from '@material-ui/core'
 import UserContactMethodCreateDialog from './UserContactMethodCreateDialog'
 import UserNotificationRuleCreateDialog from './UserNotificationRuleCreateDialog'
-import Typography from '@material-ui/core/Typography'
-import { makeStyles } from '@material-ui/core/styles'
 import UserContactMethodVerificationDialog from './UserContactMethodVerificationDialog'
-import { useQuery } from '@apollo/react-hooks'
-import _ from 'lodash-es'
+import _ from 'lodash'
 import Spinner from '../loading/components/Spinner'
 import { GenericError, ObjectNotFound } from '../error-pages'
-import { useConfigValue } from '../util/RequireConfig'
+import { useConfigValue, useSessionInfo } from '../util/RequireConfig'
+import UserEditDialog from './UserEditDialog'
+import UserDeleteDialog from './UserDeleteDialog'
 
-const query = gql`
+const userQuery = gql`
   query userInfo($id: ID!) {
     user(id: $id) {
       id
+      role
       name
       email
+      contactMethods {
+        id
+      }
       onCallSteps {
         id
         escalationPolicy {
@@ -40,48 +45,124 @@ const query = gql`
   }
 `
 
-const useStyles = makeStyles({
-  gravatarText: {
-    textAlign: 'center',
-    paddingTop: '0.5em',
-    display: 'block',
-  },
-  profileImage: {
-    width: 128,
-    height: 128,
-    margin: 'auto',
-  },
-})
+const profileQuery = gql`
+  query profileInfo($id: ID!) {
+    user(id: $id) {
+      id
+      role
+      name
+      email
+      contactMethods {
+        id
+      }
+      onCallSteps {
+        id
+        escalationPolicy {
+          id
+          assignedTo {
+            id
+            name
+          }
+        }
+      }
+      sessions {
+        id
+      }
+    }
+  }
+`
 
 function serviceCount(onCallSteps = []) {
   const svcs = {}
-  ;(onCallSteps || []).forEach(s =>
-    (s.escalationPolicy.assignedTo || []).forEach(svc => (svcs[svc.id] = true)),
+  ;(onCallSteps || []).forEach((s) =>
+    (s.escalationPolicy.assignedTo || []).forEach(
+      (svc) => (svcs[svc.id] = true),
+    ),
   )
 
   return Object.keys(svcs).length
 }
 
 export default function UserDetails(props) {
-  const classes = useStyles()
-
+  const {
+    userID: currentUserID,
+    isAdmin,
+    ready: isSessionReady,
+  } = useSessionInfo()
   const [disclaimer] = useConfigValue('General.NotificationDisclaimer')
   const [createCM, setCreateCM] = useState(false)
   const [createNR, setCreateNR] = useState(false)
+  const [showEdit, setShowEdit] = useState(false)
   const [showVerifyDialogByID, setShowVerifyDialogByID] = useState(null)
+  const [showUserDeleteDialog, setShowUserDeleteDialog] = useState(false)
 
-  const { data, loading, error } = useQuery(query, {
-    variables: { id: props.userID },
-  })
+  const {
+    data,
+    loading: isQueryLoading,
+    error,
+  } = useQuery(
+    isAdmin || props.userID === currentUserID ? profileQuery : userQuery,
+    {
+      variables: { id: props.userID },
+      skip: !isSessionReady,
+    },
+  )
+
+  const loading = !isSessionReady || isQueryLoading
 
   if (error) return <GenericError error={error.message} />
   if (!_.get(data, 'user.id')) return loading ? <Spinner /> : <ObjectNotFound />
 
   const user = _.get(data, 'user')
   const svcCount = serviceCount(user.onCallSteps)
+  const sessCount =
+    isAdmin || props.userID === currentUserID ? user.sessions.length : 0
+
+  const disableNR = user.contactMethods.length === 0
+
+  const links = [
+    {
+      label: 'On-Call Assignments',
+      url: 'on-call-assignments',
+      subText: svcCount
+        ? `On-call for ${svcCount} service${svcCount > 1 ? 's' : ''}`
+        : 'Not currently on-call',
+    },
+  ]
+
+  if (props.userID === currentUserID) {
+    links.push({
+      label: 'Schedule Calendar Subscriptions',
+      url: 'schedule-calendar-subscriptions',
+      subText: 'Manage schedules you have subscribed to',
+    })
+  }
+
+  if (isAdmin || props.userID === currentUserID) {
+    links.push({
+      label: 'Active Sessions',
+      url: 'sessions',
+      subText: `${sessCount || 'No'} active session${
+        sessCount === 1 ? '' : 's'
+      }`,
+    })
+  }
 
   return (
     <React.Fragment>
+      {showEdit && (
+        <UserEditDialog
+          onClose={() => setShowEdit(false)}
+          userID={props.userID}
+          role={user.role}
+        />
+      )}
+      {showUserDeleteDialog && (
+        <UserDeleteDialog
+          userID={props.userID}
+          onClose={() => setShowUserDeleteDialog(false)}
+        />
+      )}
       {props.readOnly ? null : (
         <SpeedDial
           label='Add Items'
@@ -94,6 +175,7 @@ export default function UserDetails(props) {
             {
               label: 'Add Notification Rule',
               icon: <AddAlarm />,
+              disabled: disableNR,
               onClick: () => setCreateNR(true),
             },
           ]}
@@ -103,7 +185,7 @@ export default function UserDetails(props) {
         <UserContactMethodCreateDialog
           userID={props.userID}
           disclaimer={disclaimer}
-          onClose={result => {
+          onClose={(result) => {
             setCreateCM(false)
             setShowVerifyDialogByID(
               result && result.contactMethodID ? result.contactMethodID : null,
@@ -124,37 +206,10 @@ export default function UserDetails(props) {
         />
       )}
       <DetailsPage
+        avatar={<UserAvatar userID={props.userID} />}
         title={user.name + (svcCount ? ' (On-Call)' : '')}
-        details={user.email}
-        icon={
-          <React.Fragment>
-            <UserAvatar
-              userID={props.userID}
-              className={classes.profileImage}
-            />
-            <Typography variant='caption' className={classes.gravatarText}>
-              Provided by{' '}
-              <a href='https://gravatar.com' target='_blank'>
-                Gravatar
-              </a>
-            </Typography>
-          </React.Fragment>
-        }
-        links={[
-          {
-            label: 'On-Call Assignments',
-            url: 'on-call-assignments',
-            subText: svcCount
-              ? `On-call for ${svcCount} service${svcCount > 1 ? 's' : ''}`
-              : 'Not currently on-call',
-          },
-        ]}
-        titleFooter={
-          props.readOnly ? null : (
-            <StatusUpdateNotification userID={props.userID} />
-          )
-        }
-        pageFooter={
+        subheader={user.email}
+        pageContent={
           <Grid container spacing={2}>
             <UserContactMethodList
               userID={props.userID}
@@ -166,6 +221,33 @@ export default function UserDetails(props) {
             />
           </Grid>
         }
+        primaryActions={
+          props.readOnly
+            ? []
+            : [
+                <StatusUpdateNotification
+                  key='primary-action-status-updates'
+                  userID={props.userID}
+                />,
+              ]
+        }
+        secondaryActions={
+          isAdmin
+            ? [
+                {
+                  label: 'Delete',
+                  icon: <Delete />,
+                  handleOnClick: () => setShowUserDeleteDialog(true),
+                },
+                {
+                  label: 'Edit',
+                  icon: <EditIcon />,
+                  handleOnClick: () => setShowEdit(true),
+                },
+              ]
+            : []
+        }
+        links={links}
       />
     </React.Fragment>
   )

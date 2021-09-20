@@ -1,154 +1,180 @@
-import React from 'react'
+import React, { useState, useCallback } from 'react'
 import p from 'prop-types'
-import gql from 'graphql-tag'
-import FormControlLabel from '@material-ui/core/FormControlLabel'
-import Grid from '@material-ui/core/Grid'
-import Switch from '@material-ui/core/Switch'
+import { gql, useQuery } from '@apollo/client'
+import { Redirect } from 'react-router-dom'
+import _ from 'lodash'
+import { Edit, Delete } from '@material-ui/icons'
+
 import DetailsPage from '../details/DetailsPage'
-import Query from '../util/Query'
-import { UserSelect } from '../selection'
-import FilterContainer from '../util/FilterContainer'
-import PageActions from '../util/PageActions'
-import OtherActions from '../util/OtherActions'
 import ScheduleEditDialog from './ScheduleEditDialog'
 import ScheduleDeleteDialog from './ScheduleDeleteDialog'
-import ScheduleCalendarQuery from './ScheduleCalendarQuery'
-import { urlParamSelector } from '../selectors'
-import { resetURLParams, setURLParam } from '../actions'
-import { connect } from 'react-redux'
+import ScheduleCalendarQuery from './calendar/ScheduleCalendarQuery'
 import { QuerySetFavoriteButton } from '../util/QuerySetFavoriteButton'
+import CalendarSubscribeButton from './calendar-subscribe/CalendarSubscribeButton'
+import Spinner from '../loading/components/Spinner'
+import { ObjectNotFound, GenericError } from '../error-pages'
+import TempSchedDialog from './temp-sched/TempSchedDialog'
+import TempSchedDeleteConfirmation from './temp-sched/TempSchedDeleteConfirmation'
+import { ScheduleAvatar } from '../util/avatars'
+import { useConfigValue } from '../util/RequireConfig'
 
 const query = gql`
-  query($id: ID!) {
+  fragment ScheduleTitleQuery on Schedule {
+    id
+    name
+    description
+  }
+  query scheduleDetailsQuery($id: ID!) {
     schedule(id: $id) {
-      id
-      name
-      description
+      ...ScheduleTitleQuery
       timeZone
     }
   }
 `
-const partialQuery = gql`
-  query($id: ID!) {
-    schedule(id: $id) {
-      id
-      name
-      description
-      isFavorite
-    }
-  }
-`
 
-const mapStateToProps = state => ({
-  userFilter: urlParamSelector(state)('userFilter', []),
-  activeOnly: urlParamSelector(state)('activeOnly', false),
+export const ScheduleCalendarContext = React.createContext({
+  onNewTempSched: () => {},
+  onEditTempSched: () => {},
+  onDeleteTempSched: () => {},
+  // ts files infer function signature, need parameter list
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  setOverrideDialog: (overrideVal) => {},
+  overrideDialog: null,
 })
 
-const mapDispatchToProps = dispatch => {
-  return {
-    setUserFilter: value => dispatch(setURLParam('userFilter', value)),
-    setActiveOnly: value => dispatch(setURLParam('activeOnly', value)),
-    resetFilter: () =>
-      dispatch(
-        resetURLParams('userFilter', 'start', 'activeOnly', 'tz', 'duration'),
-      ),
+export default function ScheduleDetails({ scheduleID }) {
+  const [showEdit, setShowEdit] = useState(false)
+  const [showDelete, setShowDelete] = useState(false)
+  const [configTempSchedule, setConfigTempSchedule] = useState(null)
+  const [deleteTempSchedule, setDeleteTempSchedule] = useState(null)
+
+  const [slackEnabled] = useConfigValue('Slack.Enable')
+
+  const onNewTempSched = useCallback(() => setConfigTempSchedule(true), [])
+  const onEditTempSched = useCallback(setConfigTempSchedule, [])
+  const onDeleteTempSched = useCallback(setDeleteTempSchedule, [])
+  const [overrideDialog, setOverrideDialog] = useState(null)
+
+  const {
+    data: _data,
+    loading,
+    error,
+  } = useQuery(query, {
+    variables: { id: scheduleID },
+    returnPartialData: true,
+  })
+
+  const data = _.get(_data, 'schedule', null)
+
+  if (loading && !data?.name) return <Spinner />
+  if (error) return <GenericError error={error.message} />
+
+  if (!data) {
+    return showDelete ? <Redirect to='/schedules' push /> : <ObjectNotFound />
   }
+
+  return (
+    <React.Fragment>
+      {showEdit && (
+        <ScheduleEditDialog
+          scheduleID={scheduleID}
+          onClose={() => setShowEdit(false)}
+        />
+      )}
+      {showDelete && (
+        <ScheduleDeleteDialog
+          scheduleID={scheduleID}
+          onClose={() => setShowDelete(false)}
+        />
+      )}
+      {configTempSchedule && (
+        <TempSchedDialog
+          value={configTempSchedule === true ? null : configTempSchedule}
+          onClose={() => setConfigTempSchedule(null)}
+          scheduleID={scheduleID}
+        />
+      )}
+      {deleteTempSchedule && (
+        <TempSchedDeleteConfirmation
+          value={deleteTempSchedule}
+          onClose={() => setDeleteTempSchedule(null)}
+          scheduleID={scheduleID}
+        />
+      )}
+      <DetailsPage
+        avatar={<ScheduleAvatar />}
+        title={data.name}
+        subheader={`Time Zone: ${data.timeZone || 'Loading...'}`}
+        details={data.description}
+        pageContent={
+          <ScheduleCalendarContext.Provider
+            value={{
+              onNewTempSched,
+              onEditTempSched,
+              onDeleteTempSched,
+              setOverrideDialog,
+              overrideDialog,
+            }}
+          >
+            <ScheduleCalendarQuery scheduleID={scheduleID} />
+          </ScheduleCalendarContext.Provider>
+        }
+        primaryActions={[
+          <CalendarSubscribeButton
+            key='primary-action-subscribe'
+            scheduleID={scheduleID}
+          />,
+        ]}
+        secondaryActions={[
+          {
+            label: 'Edit',
+            icon: <Edit />,
+            handleOnClick: () => setShowEdit(true),
+          },
+          {
+            label: 'Delete',
+            icon: <Delete />,
+            handleOnClick: () => setShowDelete(true),
+          },
+          <QuerySetFavoriteButton
+            key='secondary-action-favorite'
+            scheduleID={scheduleID}
+          />,
+        ]}
+        links={[
+          {
+            label: 'Assignments',
+            url: 'assignments',
+            subText: 'Manage rules for rotations and users',
+          },
+          {
+            label: 'Escalation Policies',
+            url: 'escalation-policies',
+            subText: 'Find escalation policies that link to this schedule',
+          },
+          {
+            label: 'Overrides',
+            url: 'overrides',
+            subText: 'Add, remove, or replace a user temporarily',
+          },
+          {
+            label: 'Shifts',
+            url: 'shifts',
+            subText: 'Review a list of past and future on-call shifts',
+          },
+
+          // only slack is supported ATM, so hide the link if disabled
+          slackEnabled && {
+            label: 'On-Call Notifications',
+            url: 'on-call-notifications',
+            subText: 'Set up notifications to know who is on-call',
+          },
+        ]}
+      />
+    </React.Fragment>
+  )
 }
 
-@connect(
-  mapStateToProps,
-  mapDispatchToProps,
-)
-export default class ScheduleDetails extends React.PureComponent {
-  static propTypes = {
-    scheduleID: p.string.isRequired,
-  }
-
-  state = {
-    edit: false,
-    delete: false,
-  }
-
-  render() {
-    return (
-      <Query
-        query={query}
-        partialQuery={partialQuery}
-        variables={{ id: this.props.scheduleID }}
-        render={({ data }) => this.renderPage(data.schedule)}
-      />
-    )
-  }
-
-  renderPage = data => {
-    return (
-      <React.Fragment>
-        <PageActions>
-          <QuerySetFavoriteButton scheduleID={data.id} />
-          <FilterContainer onReset={() => this.props.resetFilter()}>
-            <Grid item xs={12}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={this.props.activeOnly}
-                    onChange={e => this.props.setActiveOnly(e.target.checked)}
-                    value='activeOnly'
-                  />
-                }
-                label='Active shifts only'
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <UserSelect
-                label='Filter users...'
-                multiple
-                value={this.props.userFilter}
-                onChange={this.props.setUserFilter}
-              />
-            </Grid>
-          </FilterContainer>
-          <OtherActions
-            actions={[
-              {
-                label: 'Edit Schedule',
-                onClick: () => this.setState({ edit: true }),
-              },
-              {
-                label: 'Delete Schedule',
-                onClick: () => this.setState({ delete: true }),
-              },
-            ]}
-          />
-        </PageActions>
-        <DetailsPage
-          title={data.name}
-          details={data.description}
-          titleFooter={
-            <React.Fragment>Time Zone: {data.timeZone}</React.Fragment>
-          }
-          links={[
-            { label: 'Assignments', url: 'assignments' },
-            { label: 'Escalation Policies', url: 'escalation-policies' },
-            { label: 'Overrides', url: 'overrides' },
-            { label: 'Shifts', url: 'shifts' },
-          ]}
-          pageFooter={
-            <ScheduleCalendarQuery scheduleID={this.props.scheduleID} />
-          }
-        />
-        {this.state.edit && (
-          <ScheduleEditDialog
-            scheduleID={this.props.scheduleID}
-            onClose={() => this.setState({ edit: false })}
-          />
-        )}
-        {this.state.delete && (
-          <ScheduleDeleteDialog
-            scheduleID={this.props.scheduleID}
-            onClose={() => this.setState({ delete: false })}
-          />
-        )}
-      </React.Fragment>
-    )
-  }
+ScheduleDetails.propTypes = {
+  scheduleID: p.string.isRequired,
 }

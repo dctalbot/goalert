@@ -3,6 +3,10 @@ package graphql
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"sort"
+
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/escalation"
 	"github.com/target/goalert/permission"
@@ -13,9 +17,6 @@ import (
 	"github.com/target/goalert/user"
 	"github.com/target/goalert/util/errutil"
 	"github.com/target/goalert/util/log"
-	"io/ioutil"
-	"net/http"
-	"sort"
 
 	g "github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/language/ast"
@@ -101,7 +102,6 @@ func NewHandler(ctx context.Context, c Config) (*Handler, error) {
 			Interfaces:  ifaces,
 		})
 	}
-	c = cachedConfig(c)
 
 	db, err := newLegacyDB(ctx, c.DB)
 	if err != nil {
@@ -240,7 +240,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	data, err := ioutil.ReadAll(req.Body)
+	data, err := io.ReadAll(req.Body)
 	if err != nil {
 		log.Debug(ctx, errors.Wrap(err, "read GraphQL query"))
 		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)

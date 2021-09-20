@@ -4,7 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -18,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/target/goalert/auth/basic"
+	"github.com/target/goalert/config"
 	"github.com/target/goalert/keyring"
 	"github.com/target/goalert/migrate"
 	"github.com/target/goalert/permission"
@@ -26,17 +28,27 @@ import (
 	"github.com/target/goalert/switchover"
 	"github.com/target/goalert/switchover/dbsync"
 	"github.com/target/goalert/user"
+	"github.com/target/goalert/util"
 	"github.com/target/goalert/util/log"
 	"github.com/target/goalert/validation"
 	"github.com/target/goalert/version"
+	"github.com/target/goalert/web"
 	"go.opencensus.io/trace"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 var shutdownSignalCh = make(chan os.Signal, 2)
 
+// ErrDBRequired is returned when the DB URL is unset.
+var ErrDBRequired = validation.NewFieldError("db-url", "is required")
+
 func init() {
 	signal.Notify(shutdownSignalCh, shutdownSignals...)
+}
+
+func isCfgNotFound(err error) bool {
+	var cfgErr viper.ConfigFileNotFoundError
+	return errors.As(err, &cfgErr)
 }
 
 // RootCmd is the configuration for running the app binary.
@@ -58,8 +70,13 @@ var RootCmd = &cobra.Command{
 
 		err := viper.ReadInConfig()
 		// ignore file not found error
-		if _, ok := err.(viper.ConfigFileNotFoundError); err != nil && !ok {
+		if err != nil && !isCfgNotFound(err) {
 			return errors.Wrap(err, "read config")
+		}
+
+		err = initPromServer()
+		if err != nil {
+			return err
 		}
 
 		ctx := context.Background()
@@ -96,16 +113,24 @@ var RootCmd = &cobra.Command{
 		} else {
 			q.Set("application_name", fmt.Sprintf("GoAlert %s", version.GitVersion()))
 		}
+		q.Set("enable_seqscan", "off")
 		u.RawQuery = q.Encode()
 		cfg.DBURL = u.String()
 
-		s := time.Now()
-		n, err := migrate.ApplyAll(log.EnableDebug(ctx), cfg.DBURL)
-		if err != nil {
-			return errors.Wrap(err, "apply migrations")
-		}
-		if n > 0 {
-			log.Logf(ctx, "Applied %d migrations in %s.", n, time.Since(s))
+		if cfg.APIOnly {
+			err = migrate.VerifyAll(log.EnableDebug(ctx), cfg.DBURL)
+			if err != nil {
+				return errors.Wrap(err, "verify migrations")
+			}
+		} else {
+			s := time.Now()
+			n, err := migrate.ApplyAll(log.EnableDebug(ctx), cfg.DBURL)
+			if err != nil {
+				return errors.Wrap(err, "apply migrations")
+			}
+			if n > 0 {
+				log.Logf(ctx, "Applied %d migrations in %s.", n, time.Since(s))
+			}
 		}
 
 		dbc, err := wrappedDriver.OpenConnector(cfg.DBURL)
@@ -121,6 +146,7 @@ var RootCmd = &cobra.Command{
 			}
 			q := u.Query()
 			q.Set("application_name", fmt.Sprintf("GoAlert %s (S/O Mode)", version.GitVersion()))
+			q.Set("enable_seqscan", "off")
 			u.RawQuery = q.Encode()
 			cfg.DBURLNext = u.String()
 
@@ -211,6 +237,139 @@ Migration: %s (#%d)
 		},
 	}
 
+	testCmd = &cobra.Command{
+		Use:   "self-test",
+		Short: "test suite to validate functionality of GoAlert environment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			offlineOnly, _ := cmd.Flags().GetBool("offline")
+
+			var failed bool
+			result := func(name string, err error) {
+				if err != nil {
+					failed = true
+					fmt.Printf("%s: FAIL (%v)\n", name, err)
+					return
+				}
+				fmt.Printf("%s: OK\n", name)
+			}
+
+			// only do version check if UI is bundled
+			if web.AppVersion() != "" {
+				var err error
+				if version.GitVersion() != web.AppVersion() {
+					err = errors.Errorf(
+						"mismatch: backend version = '%s'; bundled UI version = '%s'",
+						version.GitVersion(),
+						web.AppVersion(),
+					)
+				}
+				result("Version", err)
+			}
+
+			cf, err := getConfig()
+			if errors.Is(err, ErrDBRequired) {
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+			var cfg config.Config
+			loadConfigDB := func() error {
+				conn, err := sql.Open("pgx", cf.DBURL)
+				if err != nil {
+					return fmt.Errorf("open db: %w", err)
+				}
+
+				ctx := context.Background()
+
+				store, err := config.NewStore(ctx, conn, cf.EncryptionKeys, "")
+				if err != nil {
+					return fmt.Errorf("read config: %w", err)
+				}
+				cfg = store.Config()
+				store.Shutdown(ctx)
+				return nil
+			}
+			if cf.DBURL != "" && !offlineOnly {
+				result("DB", loadConfigDB())
+			}
+
+			type service struct {
+				name, baseUrl string
+			}
+
+			serviceList := []service{
+				{name: "Twilio", baseUrl: "https://api.twilio.com/2010-04-01"},
+				{name: "Mailgun", baseUrl: "https://api.mailgun.net/v3"},
+				{name: "Slack", baseUrl: "https://slack.com/api/api.test"},
+			}
+
+			if cfg.OIDC.Enable {
+				serviceList = append(serviceList, service{name: "OIDC", baseUrl: cfg.OIDC.IssuerURL + "/.well-known.openid-configuration"})
+			}
+
+			if cfg.GitHub.Enable {
+				url := "https://github.com"
+				if cfg.GitHub.EnterpriseURL != "" {
+					url = cfg.GitHub.EnterpriseURL
+				}
+				serviceList = append(serviceList, service{name: "GitHub", baseUrl: url})
+			}
+
+			if offlineOnly {
+				serviceList = nil
+			}
+
+			for _, s := range serviceList {
+				resp, err := http.Get(s.baseUrl)
+				result(s.name, err)
+				if err == nil {
+					resp.Body.Close()
+				}
+			}
+
+			dstCheck := func() error {
+				const (
+					standardOffset = -21600
+					daylightOffset = -18000
+				)
+				loc, err := util.LoadLocation("America/Chicago")
+				if err != nil {
+					return fmt.Errorf("load location: %w", err)
+				}
+				t := time.Date(2020, time.March, 8, 0, 0, 0, 0, loc)
+				_, offset := t.Zone()
+				if offset != standardOffset {
+					return errors.Errorf("invalid offset: got %d; want %d", offset, standardOffset)
+				}
+				t = t.Add(3 * time.Hour)
+				_, offset = t.Zone()
+				if offset != daylightOffset {
+					return errors.Errorf("invalid offset: got %d; want %d", offset, daylightOffset)
+				}
+				t = time.Date(2020, time.November, 1, 0, 0, 0, 0, loc)
+				_, offset = t.Zone()
+				if offset != daylightOffset {
+					return errors.Errorf("invalid offset: got %d; want %d", offset, daylightOffset)
+				}
+				t = t.Add(3 * time.Hour)
+				_, offset = t.Zone()
+				if offset != standardOffset {
+					return errors.Errorf("invalid offset: got %d; want %d", offset, standardOffset)
+				}
+				return nil
+			}
+
+			result("DST Rules", dstCheck())
+
+			if failed {
+				cmd.SilenceUsage = true
+				return errors.New("one or more checks failed.")
+			}
+			return nil
+		},
+	}
+
 	switchCmd = &cobra.Command{
 		Use:   "switchover-shell",
 		Short: "Start a the switchover shell, used to initiate, control, and monitor a DB switchover operation.",
@@ -248,6 +407,11 @@ Migration: %s (#%d)
 				return err
 			}
 
+			err = initPromServer()
+			if err != nil {
+				return err
+			}
+
 			mon, err := remotemonitor.NewMonitor(cfg)
 			if err != nil {
 				return err
@@ -272,7 +436,7 @@ Migration: %s (#%d)
 
 			err := viper.ReadInConfig()
 			// ignore file not found error
-			if _, ok := err.(viper.ConfigFileNotFoundError); err != nil && !ok {
+			if err != nil && !isCfgNotFound(err) {
 				return errors.Wrap(err, "read config")
 			}
 
@@ -290,7 +454,7 @@ Migration: %s (#%d)
 
 			err := viper.ReadInConfig()
 			// ignore file not found error
-			if _, ok := err.(viper.ConfigFileNotFoundError); err != nil && !ok {
+			if err != nil && !isCfgNotFound(err) {
 				return errors.Wrap(err, "read config")
 			}
 
@@ -340,7 +504,7 @@ Migration: %s (#%d)
 			if viper.GetString("data") != "" {
 				data = []byte(viper.GetString("data"))
 			} else {
-				if terminal.IsTerminal(int(os.Stdin.Fd())) {
+				if term.IsTerminal(int(os.Stdin.Fd())) {
 					// Only print message if we're not piping
 					fmt.Println("Enter or paste config data (JSON), then press CTRL+D when done or CTRL+C to quit.")
 				}
@@ -356,7 +520,7 @@ Migration: %s (#%d)
 				}()
 
 				var err error
-				data, err = ioutil.ReadAll(os.Stdin)
+				data, err = io.ReadAll(os.Stdin)
 				close(doneCh)
 				if err != nil {
 					return errors.Wrap(err, "read stdin")
@@ -385,7 +549,7 @@ Migration: %s (#%d)
 
 			err := viper.ReadInConfig()
 			// ignore file not found error
-			if _, ok := err.(viper.ConfigFileNotFoundError); err != nil && !ok {
+			if err != nil && !isCfgNotFound(err) {
 				return errors.Wrap(err, "read config")
 			}
 
@@ -425,7 +589,7 @@ Migration: %s (#%d)
 				if cmd.Flag("admin").Value.String() == "true" {
 					u.Role = permission.RoleAdmin
 				}
-				userStore, err := user.NewDB(ctx, db)
+				userStore, err := user.NewStore(ctx, db)
 				if err != nil {
 					return errors.Wrap(err, "init user store")
 				}
@@ -437,13 +601,13 @@ Migration: %s (#%d)
 			}
 
 			if pass == "" {
-				fmt.Printf("New Password: ")
-				p, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Fprint(os.Stderr, "New Password: ")
+				p, err := term.ReadPassword(int(os.Stdin.Fd()))
 				if err != nil {
 					return errors.Wrap(err, "get password")
 				}
 				pass = string(p)
-				fmt.Printf("\n'%s'\n", pass)
+				fmt.Fprintln(os.Stderr)
 			}
 
 			err = basicStore.CreateTx(ctx, tx, id, username, pass)
@@ -464,8 +628,8 @@ Migration: %s (#%d)
 )
 
 // getConfig will load the current configuration from viper
-func getConfig() (appConfig, error) {
-	cfg := appConfig{
+func getConfig() (Config, error) {
+	cfg := Config{
 		JSON:        viper.GetBool("json"),
 		LogRequests: viper.GetBool("log-requests"),
 		Verbose:     viper.GetBool("verbose"),
@@ -482,6 +646,13 @@ func getConfig() (appConfig, error) {
 		ListenAddr: viper.GetString("listen"),
 
 		TLSListenAddr: viper.GetString("listen-tls"),
+
+		SysAPIListenAddr: viper.GetString("listen-sysapi"),
+		SysAPICertFile:   viper.GetString("sysapi-cert-file"),
+		SysAPIKeyFile:    viper.GetString("sysapi-key-file"),
+		SysAPICAFile:     viper.GetString("sysapi-ca-file"),
+
+		HTTPPrefix: viper.GetString("http-prefix"),
 
 		SlackBaseURL:  viper.GetString("slack-base-url"),
 		TwilioBaseURL: viper.GetString("twilio-base-url"),
@@ -514,7 +685,7 @@ func getConfig() (appConfig, error) {
 	}
 
 	if cfg.DBURL == "" {
-		return cfg, validation.NewFieldError("db-url", "is required")
+		return cfg, ErrDBRequired
 	}
 
 	var err error
@@ -531,57 +702,70 @@ func getConfig() (appConfig, error) {
 }
 
 func init() {
-	RootCmd.Flags().StringP("listen", "l", "localhost:8081", "Listen address:port for the application.")
+	def := Defaults()
+	RootCmd.Flags().StringP("listen", "l", def.ListenAddr, "Listen address:port for the application.")
 
-	RootCmd.Flags().StringP("listen-tls", "t", "", "HTTPS listen address:port for the application.  Requires setting --tls-cert-data and --tls-key-data OR --tls-cert-file and --tls-key-file.")
+	RootCmd.Flags().StringP("listen-tls", "t", def.TLSListenAddr, "HTTPS listen address:port for the application.  Requires setting --tls-cert-data and --tls-key-data OR --tls-cert-file and --tls-key-file.")
+
+	RootCmd.Flags().String("listen-sysapi", "", "(Experimental) Listen address:port for the system API (gRPC).")
+	RootCmd.Flags().String("sysapi-cert-file", "", "(Experimental) Specifies a path to a PEM-encoded certificate to use when connecting to plugin services.")
+	RootCmd.Flags().String("sysapi-key-file", "", "(Experimental) Specifies a path to a PEM-encoded private key file use when connecting to plugin services.")
+	RootCmd.Flags().String("sysapi-ca-file", "", "(Experimental) Specifies a path to a PEM-encoded certificate(s) to authorize connections from plugin services.")
+
+	RootCmd.PersistentFlags().StringP("listen-prometheus", "p", "", "Bind address for Prometheus metrics.")
+
 	RootCmd.Flags().String("tls-cert-file", "", "Specifies a path to a PEM-encoded certificate.  Has no effect if --listen-tls is unset.")
 	RootCmd.Flags().String("tls-key-file", "", "Specifies a path to a PEM-encoded private key file.  Has no effect if --listen-tls is unset.")
 	RootCmd.Flags().String("tls-cert-data", "", "Specifies a PEM-encoded certificate.  Has no effect if --listen-tls is unset.")
 	RootCmd.Flags().String("tls-key-data", "", "Specifies a PEM-encoded private key.  Has no effect if --listen-tls is unset.")
 
-	RootCmd.Flags().Bool("api-only", false, "Starts in API-only mode (schedules & notifications will not be processed). Useful in clusters.")
+	RootCmd.Flags().String("http-prefix", def.HTTPPrefix, "Specify the HTTP prefix of the application.")
 
-	RootCmd.Flags().Int("db-max-open", 15, "Max open DB connections.")
-	RootCmd.Flags().Int("db-max-idle", 5, "Max idle DB connections.")
+	RootCmd.Flags().Bool("api-only", def.APIOnly, "Starts in API-only mode (schedules & notifications will not be processed). Useful in clusters.")
 
-	RootCmd.Flags().Int64("max-request-body-bytes", 256*1024, "Max body size for all incoming requests (in bytes). Set to 0 to disable limit.")
-	RootCmd.Flags().Int("max-request-header-bytes", 4096, "Max header size for all incoming requests (in bytes). Set to 0 to disable limit.")
+	RootCmd.Flags().Int("db-max-open", def.DBMaxOpen, "Max open DB connections.")
+	RootCmd.Flags().Int("db-max-idle", def.DBMaxIdle, "Max idle DB connections.")
 
+	RootCmd.Flags().Int64("max-request-body-bytes", def.MaxReqBodyBytes, "Max body size for all incoming requests (in bytes). Set to 0 to disable limit.")
+	RootCmd.Flags().Int("max-request-header-bytes", def.MaxReqHeaderBytes, "Max header size for all incoming requests (in bytes). Set to 0 to disable limit.")
+
+	// No longer used
 	RootCmd.Flags().String("github-base-url", "", "Base URL for GitHub auth and API calls.")
-	RootCmd.Flags().String("twilio-base-url", "", "Override the Twilio API URL.")
-	RootCmd.Flags().String("slack-base-url", "", "Override the Slack base URL.")
 
-	RootCmd.Flags().String("region-name", "default", "Name of region for message processing (case sensitive). Only one instance per-region-name will process outgoing messages.")
+	RootCmd.Flags().String("twilio-base-url", def.TwilioBaseURL, "Override the Twilio API URL.")
+	RootCmd.Flags().String("slack-base-url", def.SlackBaseURL, "Override the Slack base URL.")
 
-	RootCmd.PersistentFlags().String("db-url", "", "Connection string for Postgres.")
-	RootCmd.PersistentFlags().String("db-url-next", "", "Connection string for the *next* Postgres server (enables DB switch-over mode).")
+	RootCmd.Flags().String("region-name", def.RegionName, "Name of region for message processing (case sensitive). Only one instance per-region-name will process outgoing messages.")
 
-	RootCmd.Flags().String("jaeger-endpoint", "", "Jaeger HTTP Thrift endpoint")
-	RootCmd.Flags().String("jaeger-agent-endpoint", "", "Instructs Jaeger exporter to send spans to jaeger-agent at this address.")
-	RootCmd.Flags().String("stackdriver-project-id", "", "Project ID for Stackdriver. Enables tracing output to Stackdriver.")
-	RootCmd.Flags().String("tracing-cluster-name", "", "Cluster name to use for tracing (i.e. kubernetes, Stackdriver/GKE environment).")
-	RootCmd.Flags().String("tracing-pod-namespace", "", "Pod namespace to use for tracing.")
-	RootCmd.Flags().String("tracing-pod-name", "", "Pod name to use for tracing.")
-	RootCmd.Flags().String("tracing-container-name", "", "Container name to use for tracing.")
-	RootCmd.Flags().String("tracing-node-name", "", "Node name to use for tracing.")
-	RootCmd.Flags().Float64("tracing-probability", 0.01, "Probability of a new trace to be recorded.")
+	RootCmd.PersistentFlags().String("db-url", def.DBURL, "Connection string for Postgres.")
+	RootCmd.PersistentFlags().String("db-url-next", def.DBURLNext, "Connection string for the *next* Postgres server (enables DB switch-over mode).")
 
-	RootCmd.Flags().Duration("kubernetes-cooldown", 0, "Cooldown period, from the last TCP connection, before terminating the listener when receiving a shutdown signal.")
-	RootCmd.Flags().String("status-addr", "", "Open a port to emit status updates. Connections are closed when the server shuts down. Can be used to keep containers running until GoAlert has exited.")
+	RootCmd.Flags().String("jaeger-endpoint", def.JaegerEndpoint, "Jaeger HTTP Thrift endpoint")
+	RootCmd.Flags().String("jaeger-agent-endpoint", def.JaegerAgentEndpoint, "Instructs Jaeger exporter to send spans to jaeger-agent at this address.")
+	RootCmd.Flags().String("stackdriver-project-id", def.StackdriverProjectID, "Project ID for Stackdriver. Enables tracing output to Stackdriver.")
+	RootCmd.Flags().String("tracing-cluster-name", def.TracingClusterName, "Cluster name to use for tracing (i.e. kubernetes, Stackdriver/GKE environment).")
+	RootCmd.Flags().String("tracing-pod-namespace", def.TracingPodNamespace, "Pod namespace to use for tracing.")
+	RootCmd.Flags().String("tracing-pod-name", def.TracingPodName, "Pod name to use for tracing.")
+	RootCmd.Flags().String("tracing-container-name", def.TracingContainerName, "Container name to use for tracing.")
+	RootCmd.Flags().String("tracing-node-name", def.TracingNodeName, "Node name to use for tracing.")
+	RootCmd.Flags().Float64("tracing-probability", def.TraceProbability, "Probability of a new trace to be recorded.")
 
-	RootCmd.PersistentFlags().String("data-encryption-key", "", "Encryption key for sensitive data like signing keys. Used for encrypting new and decrypting existing data.")
+	RootCmd.Flags().Duration("kubernetes-cooldown", def.KubernetesCooldown, "Cooldown period, from the last TCP connection, before terminating the listener when receiving a shutdown signal.")
+	RootCmd.Flags().String("status-addr", def.StatusAddr, "Open a port to emit status updates. Connections are closed when the server shuts down. Can be used to keep containers running until GoAlert has exited.")
+
+	RootCmd.PersistentFlags().String("data-encryption-key", "", "Used to generate an encryption key for sensitive data like signing keys. Can be any length.")
 	RootCmd.PersistentFlags().String("data-encryption-key-old", "", "Fallback key. Used for decrypting existing data only.")
 	RootCmd.PersistentFlags().Bool("stack-traces", false, "Enables stack traces with all error logs.")
 
-	RootCmd.Flags().Bool("stub-notifiers", false, "If true, notification senders will be replaced with a stub notifier that always succeeds (useful for staging/sandbox environments).")
+	RootCmd.Flags().Bool("stub-notifiers", def.StubNotifiers, "If true, notification senders will be replaced with a stub notifier that always succeeds (useful for staging/sandbox environments).")
 
-	RootCmd.PersistentFlags().BoolP("verbose", "v", false, "Enable verbose logging.")
-	RootCmd.Flags().Bool("log-requests", false, "Log all HTTP requests. If false, requests will be logged for debug/trace contexts only.")
-	RootCmd.PersistentFlags().Bool("json", false, "Log in JSON format.")
+	RootCmd.PersistentFlags().BoolP("verbose", "v", def.Verbose, "Enable verbose logging.")
+	RootCmd.Flags().Bool("log-requests", def.LogRequests, "Log all HTTP requests. If false, requests will be logged for debug/trace contexts only.")
+	RootCmd.PersistentFlags().Bool("json", def.JSON, "Log in JSON format.")
 	RootCmd.PersistentFlags().Bool("log-errors-only", false, "Only log errors (superseeds other flags).")
 
-	RootCmd.Flags().String("ui-url", "", "Proxy UI requests to an alternate host. Default is to serve bundled assets from memory.")
-	RootCmd.Flags().Bool("disable-https-redirect", false, "Disable automatic HTTPS redirects.")
+	RootCmd.Flags().String("ui-url", def.UIURL, "Proxy UI requests to an alternate host. Default is to serve bundled assets from memory.")
+	RootCmd.Flags().Bool("disable-https-redirect", def.DisableHTTPSRedirect, "Disable automatic HTTPS redirects.")
 
 	migrateCmd.Flags().String("up", "", "Target UP migration to apply.")
 	migrateCmd.Flags().String("down", "", "Target DOWN migration to roll back to.")
@@ -596,8 +780,11 @@ func init() {
 	setConfigCmd.Flags().String("data", "", "Use data instead of reading config from stdin.")
 	setConfigCmd.Flags().Bool("allow-empty-data-encryption-key", false, "Explicitly allow an empty data-encryption-key when setting config.")
 
+	testCmd.Flags().Bool("offline", false, "Only perform offline checks.")
+
 	monitorCmd.Flags().StringP("config-file", "f", "", "Configuration file for monitoring (required).")
-	RootCmd.AddCommand(versionCmd, migrateCmd, exportCmd, monitorCmd, switchCmd, addUserCmd, getConfigCmd, setConfigCmd)
+	initCertCommands()
+	RootCmd.AddCommand(versionCmd, testCmd, migrateCmd, exportCmd, monitorCmd, switchCmd, addUserCmd, getConfigCmd, setConfigCmd, genCerts)
 
 	err := viper.BindPFlags(RootCmd.Flags())
 	if err != nil {

@@ -1,3 +1,4 @@
+/* eslint @typescript-eslint/no-var-requires: 0 */
 const path = require('path')
 const glob = require('glob')
 
@@ -7,9 +8,13 @@ module.exports = {
   entry: {
     'support/index': path.join(__dirname, 'cypress/support'),
     'integration/all': glob.sync(path.join(__dirname, 'cypress/integration/*')),
+    'plugins/index': path.join(__dirname, 'cypress/ci-plugins.js'),
   },
+  target: 'node',
   output: {
-    path: path.join(__dirname, '../../cypress'),
+    path: path.join(__dirname, '../../bin/build/integration/cypress'),
+    libraryTarget: 'commonjs-module',
+    libraryExport: 'default',
   },
   resolve: {
     extensions: ['.js', '.ts'],
@@ -17,6 +22,7 @@ module.exports = {
   // Loaders for processing different file types
   module: {
     rules: [
+      { test: /lodash/, loader: 'strict-loader' },
       {
         test: /\.json$/,
         loader: 'json-loader',
@@ -27,7 +33,7 @@ module.exports = {
         exclude: [/node_modules/],
         use: [
           {
-            loader: 'ts-loader',
+            loader: 'babel-loader',
           },
         ],
       },
@@ -35,5 +41,5 @@ module.exports = {
   },
 
   // Source maps used for debugging information
-  devtool: 'cheap-module-eval-source-map',
+  devtool: 'eval-cheap-module-source-map',
 }

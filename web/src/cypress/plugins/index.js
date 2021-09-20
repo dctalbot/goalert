@@ -1,3 +1,4 @@
+/* eslint @typescript-eslint/no-var-requires: 0 */
 // ***********************************************************
 // This example plugins/index.js can be used to load plugins
 //
@@ -12,8 +13,9 @@
 // the project's config changing)
 
 const wp = require('@cypress/webpack-preprocessor')
+const tasks = require('./tasks')
 
-module.exports = (on, config) => {
+module.exports = (on) => {
   // `on` is used to hook into various events Cypress emits
   // `config` is the resolved Cypress config
   const options = {
@@ -32,7 +34,7 @@ module.exports = (on, config) => {
             exclude: [/node_modules/],
             use: [
               {
-                loader: 'ts-loader',
+                loader: 'babel-loader',
               },
             ],
           },
@@ -41,4 +43,5 @@ module.exports = (on, config) => {
     },
   }
   on('file:preprocessor', wp(options))
+  on('task', tasks)
 }

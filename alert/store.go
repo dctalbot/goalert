@@ -3,6 +3,8 @@ package alert
 import (
 	"context"
 	"database/sql"
+	"time"
+
 	alertlog "github.com/target/goalert/alert/log"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/util"
@@ -10,7 +12,6 @@ import (
 	"github.com/target/goalert/util/sqlutil"
 	"github.com/target/goalert/validation"
 	"github.com/target/goalert/validation/validate"
-	"time"
 
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
@@ -50,6 +51,10 @@ type Manager interface {
 	UpdateManyAlertStatus(ctx context.Context, status Status, alertIDs []int) (updatedAlertIDs []int, err error)
 	UpdateStatusTx(context.Context, *sql.Tx, int, Status) error
 	EPID(ctx context.Context, alertID int) (string, error)
+
+	// ServiceInfo will return the name of the given service ID as well as the current number
+	// of unacknowledged alerts.
+	ServiceInfo(ctx context.Context, serviceID string) (string, int, error)
 }
 
 type DB struct {
@@ -76,10 +81,13 @@ type DB struct {
 	updateByStatusAndService *sql.Stmt
 	updateByIDAndStatus      *sql.Stmt
 
+	noStepsBySvc *sql.Stmt
+
 	epID *sql.Stmt
 
 	escalate *sql.Stmt
 	epState  *sql.Stmt
+	svcInfo  *sql.Stmt
 }
 
 // A Trigger signals that an alert needs to be processed
@@ -95,6 +103,17 @@ func NewDB(ctx context.Context, db *sql.DB, logDB alertlog.Store) (*DB, error) {
 	return &DB{
 		db:    db,
 		logDB: logDB,
+
+		noStepsBySvc: p(`
+			SELECT coalesce(
+				(SELECT true
+				FROM escalation_policies pol
+				JOIN services svc ON svc.id = $1
+				WHERE
+					pol.id = svc.escalation_policy_id
+					AND pol.step_count = 0)
+			, false)
+		`),
 
 		lockSvc:      p(`select 1 from services where id = $1 for update`),
 		lockAlertSvc: p(`SELECT 1 FROM services s JOIN alerts a ON a.id = ANY ($1) AND s.id = a.service_id FOR UPDATE`),
@@ -228,7 +247,36 @@ func NewDB(ctx context.Context, db *sql.DB, logDB alertlog.Store) (*DB, error) {
 			FROM escalation_policy_state
 			WHERE alert_id = ANY ($1)
 		`),
+
+		svcInfo: p(`
+			SELECT
+				name,
+				(SELECT count(*) FROM alerts WHERE service_id = $1 AND status = 'triggered')
+			FROM services
+			WHERE id = $1
+		`),
 	}, prep.Err
+}
+
+func (db *DB) ServiceInfo(ctx context.Context, serviceID string) (string, int, error) {
+	err := permission.LimitCheckAny(ctx, permission.User)
+	if err != nil {
+		return "", 0, err
+	}
+
+	err = validate.UUID("ServiceID", serviceID)
+	if err != nil {
+		return "", 0, err
+	}
+
+	var name string
+	var count int
+	err = db.svcInfo.QueryRowContext(ctx, serviceID).Scan(&name, &count)
+	if err != nil {
+		return "", 0, err
+	}
+
+	return name, count, nil
 }
 
 func (db *DB) EPID(ctx context.Context, alertID int) (string, error) {
@@ -301,7 +349,7 @@ func (db *DB) EscalateMany(ctx context.Context, alertIDs []int) ([]int, error) {
 	}
 
 	rows, err := tx.StmtContext(ctx, db.escalate).QueryContext(ctx, ids)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		log.Debugf(ctx, "escalate alert: no rows matched")
 		err = nil
 	}
@@ -333,7 +381,7 @@ func (db *DB) EscalateMany(ctx context.Context, alertIDs []int) ([]int, error) {
 }
 
 func (db *DB) UpdateStatusByService(ctx context.Context, serviceID string, status Status) error {
-	err := permission.LimitCheckAny(ctx, permission.Admin, permission.User)
+	err := permission.LimitCheckAny(ctx, permission.System, permission.Admin, permission.User)
 	if err != nil {
 		return err
 	}
@@ -473,12 +521,12 @@ func (db *DB) Create(ctx context.Context, a *Alert) (*Alert, error) {
 		return nil, err
 	}
 
-	n, err = db._create(ctx, tx, *n)
+	n, meta, err := db._create(ctx, tx, *n)
 	if err != nil {
 		return nil, err
 	}
 
-	db.logDB.MustLogTx(ctx, tx, n.ID, alertlog.TypeCreated, nil)
+	db.logDB.MustLogTx(ctx, tx, n.ID, alertlog.TypeCreated, meta)
 
 	err = tx.Commit()
 	if err != nil {
@@ -494,17 +542,24 @@ func (db *DB) Create(ctx context.Context, a *Alert) (*Alert, error) {
 	)
 	ctx = log.WithFields(ctx, log.Fields{"AlertID": n.ID, "ServiceID": n.ServiceID})
 	log.Logf(ctx, "Alert created.")
+	metricCreatedTotal.Inc()
 
 	return n, nil
 }
-func (db *DB) _create(ctx context.Context, tx *sql.Tx, a Alert) (*Alert, error) {
+func (db *DB) _create(ctx context.Context, tx *sql.Tx, a Alert) (*Alert, *alertlog.CreatedMetaData, error) {
+	var meta alertlog.CreatedMetaData
 	row := tx.StmtContext(ctx, db.insert).QueryRowContext(ctx, a.Summary, a.Details, a.ServiceID, a.Source, a.Status, a.DedupKey())
 	err := row.Scan(&a.ID, &a.CreatedAt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &a, nil
+	err = tx.StmtContext(ctx, db.noStepsBySvc).QueryRowContext(ctx, a.ServiceID).Scan(&meta.EPNoSteps)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &a, &meta, nil
 }
 func (db *DB) CreateOrUpdateTx(ctx context.Context, tx *sql.Tx, a *Alert) (*Alert, bool, error) {
 	err := permission.LimitCheckAny(ctx,
@@ -539,8 +594,10 @@ func (db *DB) CreateOrUpdateTx(ctx context.Context, tx *sql.Tx, a *Alert) (*Aler
 
 	var inserted bool
 	var logType alertlog.Type
+	var meta interface{}
 	switch n.Status {
 	case StatusTriggered:
+		var m alertlog.CreatedMetaData
 		err = tx.Stmt(db.createUpdNew).
 			QueryRowContext(ctx, n.Summary, n.Details, n.ServiceID, n.Source, n.DedupKey()).
 			Scan(&n.ID, &n.Summary, &n.Details, &n.Status, &n.Source, &n.CreatedAt, &inserted)
@@ -548,7 +605,12 @@ func (db *DB) CreateOrUpdateTx(ctx context.Context, tx *sql.Tx, a *Alert) (*Aler
 			logType = alertlog.TypeDuplicateSupressed
 		} else {
 			logType = alertlog.TypeCreated
+			stepErr := tx.StmtContext(ctx, db.noStepsBySvc).QueryRowContext(ctx, n.ServiceID).Scan(&m.EPNoSteps)
+			if stepErr != nil {
+				return nil, false, err
+			}
 		}
+		meta = &m
 	case StatusActive:
 		var oldStatus Status
 		err = tx.Stmt(db.createUpdAck).
@@ -563,7 +625,7 @@ func (db *DB) CreateOrUpdateTx(ctx context.Context, tx *sql.Tx, a *Alert) (*Aler
 			Scan(&n.ID, &n.Summary, &n.Details, &n.CreatedAt)
 		logType = alertlog.TypeClosed
 	}
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		// already closed/doesn't exist
 		return nil, false, nil
 	}
@@ -571,7 +633,7 @@ func (db *DB) CreateOrUpdateTx(ctx context.Context, tx *sql.Tx, a *Alert) (*Aler
 		return nil, false, err
 	}
 	if logType != "" {
-		db.logDB.MustLogTx(ctx, tx, n.ID, logType, nil)
+		db.logDB.MustLogTx(ctx, tx, n.ID, logType, meta)
 	}
 
 	return n, inserted, nil
@@ -616,6 +678,7 @@ func (db *DB) CreateOrUpdate(ctx context.Context, a *Alert) (*Alert, error) {
 		)
 		ctx = log.WithFields(ctx, log.Fields{"AlertID": n.ID, "ServiceID": n.ServiceID})
 		log.Logf(ctx, "Alert created.")
+		metricCreatedTotal.Inc()
 	}
 
 	return n, nil
@@ -777,7 +840,7 @@ func (db *DB) State(ctx context.Context, alertIDs []int) ([]State, error) {
 
 	var t sqlutil.NullTime
 	rows, err := db.epState.QueryContext(ctx, sqlutil.IntArray(alertIDs))
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
 	if err != nil {

@@ -8,20 +8,21 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 	"github.com/ttacon/libphonenumber"
 )
 
 // DataGen handles generating random data for tests. It ties arbitrary ids to
 // generated values so they can be re-used during a test.
 type DataGen struct {
-	data map[dataGenKey]string
-	uniq map[dataGenKey]bool
-	mx   sync.Mutex
-	g    Generator
-	t    *testing.T
-	name string
+	data  map[dataGenKey]string
+	uniq  map[dataGenKey]bool
+	names map[string]string
+	mx    sync.Mutex
+	g     Generator
+	t     *testing.T
+	name  string
 }
 
 type DataGenFunc func() string
@@ -43,11 +44,12 @@ func (d DataGenArgFunc) Generate(a string) string {
 // NewDataGen will create a new data generator. fn should return a new/unique string each time
 func NewDataGen(t *testing.T, name string, g Generator) *DataGen {
 	return &DataGen{
-		data: make(map[dataGenKey]string),
-		uniq: make(map[dataGenKey]bool),
-		g:    g,
-		t:    t,
-		name: name,
+		data:  make(map[dataGenKey]string),
+		uniq:  make(map[dataGenKey]bool),
+		names: make(map[string]string),
+		g:     g,
+		t:     t,
+		name:  name,
 	}
 }
 
@@ -64,20 +66,21 @@ func (d *DataGen) Get(id string) string {
 func (d *DataGen) GetWithArg(arg, id string) string {
 	d.mx.Lock()
 	defer d.mx.Unlock()
-	if id == "" {
-		return d.g.Generate(arg)
-	}
 	key := dataGenKey{arg: arg, id: id}
 	val := dataGenKey{arg: arg, id: ""}
 	var ok bool
-	val.id, ok = d.data[key]
+	if id != "" {
+		// only return previous value if given an ID
+		val.id, ok = d.data[key]
+	}
 	if !ok {
 		val.id = d.g.Generate(arg)
 		for d.uniq[val] {
 			val.id = d.g.Generate(arg)
 		}
 		d.uniq[val] = true
-		d.t.Logf(`%s("%s") = "%s"`, d.name, id, val.id)
+		d.t.Logf(`%s(%s) = %s`, d.name, id, val.id)
+		d.names[val.id] = id
 		d.data[key] = val.id
 	}
 
@@ -86,16 +89,14 @@ func (d *DataGen) GetWithArg(arg, id string) string {
 
 // GenUUID will return a random UUID.
 func GenUUID() string {
-	return uuid.NewV4().String()
-}
-
-// GenPhone will return a random phone number
-func GenPhone() string {
-	return GenPhoneCC("+1")
+	return uuid.New().String()
 }
 
 // GenPhoneCC will return a random phone number with supplied country code
 func GenPhoneCC(cc string) string {
+	if cc == "" {
+		cc = "+1"
+	}
 	ccInt, err := strconv.Atoi(strings.TrimPrefix(cc, "+"))
 	if err != nil {
 		panic(errors.Wrapf(err, "parse country code '%s'", cc))

@@ -1,29 +1,34 @@
-import React from 'react'
+import React, { useState } from 'react'
 import p from 'prop-types'
-import withStyles from '@material-ui/core/styles/withStyles'
 import Button from '@material-ui/core/Button'
 import Dialog from '@material-ui/core/Dialog'
 import DialogActions from '@material-ui/core/DialogActions'
 import DialogContent from '@material-ui/core/DialogContent'
 import Typography from '@material-ui/core/Typography'
-import withMobileDialog from '@material-ui/core/withMobileDialog'
-import { DefaultTransition, FullscreenTransition } from '../util/Transitions'
-import withWidth, { isWidthUp } from '@material-ui/core/withWidth/index'
+import { makeStyles } from '@material-ui/core/styles'
+import { isWidthUp } from '@material-ui/core/withWidth/index'
+
+import { FadeTransition, SlideTransition } from '../util/Transitions'
 import LoadingButton from '../loading/components/LoadingButton'
 import DialogTitleWrapper from './components/DialogTitleWrapper'
 import DialogContentError from './components/DialogContentError'
 import { styles as globalStyles } from '../styles/materialStyles'
-import gracefulUnmount from '../util/gracefulUnmount'
 import { Form } from '../forms'
 import ErrorBoundary from '../main/ErrorBoundary'
+import Notices from '../details/Notices'
+import useWidth from '../util/useWidth'
 
-const styles = theme => {
+const useStyles = makeStyles((theme) => {
   const { cancelButton, dialogWidth } = globalStyles(theme)
   return {
     cancelButton,
     dialogWidth,
     form: {
       height: '100%', // pushes caption to bottom if room is available
+    },
+    dialogContent: {
+      height: '100%', // parents of form need height set to properly function in Safari
+      padding: 0,
     },
     formContainer: {
       width: '100%',
@@ -36,115 +41,43 @@ const styles = theme => {
       overflowY: 'visible',
     },
   }
-}
+})
 
-@withStyles(styles)
-@withMobileDialog()
-@withWidth()
-@gracefulUnmount()
-export default class FormDialog extends React.PureComponent {
-  static propTypes = {
-    title: p.string.isRequired,
-    subTitle: p.string,
-    caption: p.string,
+function FormDialog(props) {
+  const classes = useStyles()
+  const width = useWidth()
+  const isWideScreen = isWidthUp('md', width)
+  const [open, setOpen] = useState(true)
 
-    errors: p.arrayOf(
-      p.shape({
-        message: p.string.isRequired,
-        nonSubmit: p.bool, // indicates that it is a non-submit related error
-      }),
-    ),
+  const {
+    alert,
+    confirm,
+    disableGutters,
+    errors,
+    fullScreen,
+    loading,
+    primaryActionLabel, // remove from dialogProps spread
+    maxWidth,
+    notices,
+    onClose,
+    onSubmit,
+    subTitle, // can't be used in dialogProps spread
+    title,
+    onNext,
+    onBack,
+    ...dialogProps
+  } = props
 
-    form: p.element,
-    loading: p.bool,
-    alert: p.bool,
-    confirm: p.bool,
-    maxWidth: p.string,
-
-    // disables form content padding
-    disableGutters: p.bool,
-
-    onClose: p.func,
-    onSubmit: p.func,
-
-    // provided by gracefulUnmount()
-    isUnmounting: p.bool,
-    onExited: p.func,
-
-    // allow the dialog to grow beyond the normal max-width.
-    grow: p.bool,
+  const handleOnClose = () => {
+    setOpen(false)
   }
 
-  static defaultProps = {
-    errors: [],
-    onClose: () => {},
-    onSubmit: () => {},
-    loading: false,
-    confirm: false,
-    caption: '',
-    maxWidth: 'sm',
+  const handleOnExited = () => {
+    onClose()
   }
 
-  render() {
-    const {
-      alert,
-      classes,
-      confirm,
-      disableGutters,
-      errors,
-      isUnmounting,
-      loading,
-      maxWidth,
-      onClose,
-      onSubmit,
-      subTitle, // can't be used in dialogProps spread
-      title,
-      width,
-      ...dialogProps
-    } = this.props
-    const isWideScreen = isWidthUp('md', width)
-
-    return (
-      <Dialog
-        {...dialogProps}
-        disableBackdropClick={!isWideScreen}
-        fullScreen={!isWideScreen && !confirm && !alert}
-        maxWidth={maxWidth}
-        fullWidth
-        open={!isUnmounting}
-        onClose={alert ? null : onClose}
-        TransitionComponent={
-          isWideScreen || confirm || alert
-            ? DefaultTransition
-            : FullscreenTransition
-        }
-      >
-        <DialogTitleWrapper
-          fullScreen={!isWideScreen && !confirm && !alert}
-          onClose={onClose}
-          title={title}
-          subTitle={subTitle}
-        />
-        <Form
-          className={classes.formContainer}
-          onSubmit={(e, valid) => {
-            e.preventDefault()
-            if (valid) onSubmit()
-          }}
-        >
-          <ErrorBoundary>
-            {this.renderForm()}
-            {this.renderCaption()}
-            {this.renderErrors()}
-            {this.renderActions()}
-          </ErrorBoundary>
-        </Form>
-      </Dialog>
-    )
-  }
-
-  renderForm = () => {
-    const { classes, disableGutters, form } = this.props
+  function renderForm() {
+    const { form } = props
 
     // don't render empty space
     if (!form) {
@@ -157,20 +90,20 @@ export default class FormDialog extends React.PureComponent {
     return <Component className={classes.form}>{form}</Component>
   }
 
-  renderCaption = () => {
-    if (!this.props.caption) return null
+  function renderCaption() {
+    if (!props.caption) return null
 
     return (
       <DialogContent>
-        <Typography variant='caption'>{this.props.caption}</Typography>
+        <Typography variant='caption'>{props.caption}</Typography>
       </DialogContent>
     )
   }
 
-  renderErrors = () => {
-    return this.props.errors.map((err, idx) => (
+  function renderErrors() {
+    return props.errors.map((err, idx) => (
       <DialogContentError
-        className={this.props.classes.errorContainer}
+        className={classes.errorContainer}
         error={err.message || err}
         key={idx}
         noPadding
@@ -178,31 +111,32 @@ export default class FormDialog extends React.PureComponent {
     ))
   }
 
-  renderActions = () => {
-    const { alert, confirm, classes, errors, loading, onClose } = this.props
-
+  function renderActions() {
     if (alert) {
       return (
         <DialogActions>
-          <Button color='primary' onClick={onClose} variant='contained'>
-            Okay
+          <Button color='primary' onClick={handleOnClose} variant='contained'>
+            {primaryActionLabel || 'Okay'}
           </Button>
         </DialogActions>
       )
     }
+
+    const submitText = onNext ? 'Next' : 'Submit'
 
     return (
       <DialogActions>
         <Button
           className={classes.cancelButton}
           disabled={loading}
-          onClick={onClose}
+          onClick={onBack || handleOnClose}
         >
-          Cancel
+          {onBack ? 'Back' : 'Cancel'}
         </Button>
         <LoadingButton
-          attemptCount={errors.filter(e => !e.nonSubmit).length ? 1 : 0}
-          buttonText={confirm ? 'Confirm' : 'Submit'}
+          form='dialog-form'
+          attemptCount={errors.filter((e) => !e.nonSubmit).length ? 1 : 0}
+          buttonText={primaryActionLabel || (confirm ? 'Confirm' : submitText)}
           color='primary'
           loading={loading}
           type='submit'
@@ -210,4 +144,109 @@ export default class FormDialog extends React.PureComponent {
       </DialogActions>
     )
   }
+
+  const fs = fullScreen || (!isWideScreen && !confirm)
+  return (
+    <Dialog
+      fullScreen={fs}
+      maxWidth={maxWidth}
+      fullWidth
+      open={open}
+      onClose={(event, reason) => {
+        if (reason === 'backdropClick' && (!isWideScreen || alert)) {
+          // disable backdrop for mobile and alerts
+          return
+        }
+        handleOnClose()
+      }}
+      TransitionComponent={
+        isWideScreen || confirm ? FadeTransition : SlideTransition
+      }
+      {...dialogProps}
+      TransitionProps={{
+        onExited: handleOnExited,
+      }}
+    >
+      <Notices notices={notices} />
+      <DialogTitleWrapper
+        fullScreen={fs}
+        onClose={handleOnClose}
+        title={title}
+        subTitle={subTitle}
+      />
+      <DialogContent className={classes.dialogContent}>
+        <Form
+          id='dialog-form'
+          className={classes.formContainer}
+          onSubmit={(e, valid) => {
+            e.preventDefault()
+            if (valid) {
+              onNext ? onNext() : onSubmit()
+            }
+          }}
+        >
+          <ErrorBoundary>{renderForm()}</ErrorBoundary>
+        </Form>
+      </DialogContent>
+      {renderCaption()}
+      {renderErrors()}
+      {renderActions()}
+    </Dialog>
+  )
 }
+
+FormDialog.propTypes = {
+  title: p.node.isRequired,
+  subTitle: p.node,
+  caption: p.node,
+
+  errors: p.arrayOf(
+    p.shape({
+      message: p.string.isRequired,
+      nonSubmit: p.bool, // indicates that it is a non-submit related error
+    }),
+  ),
+
+  form: p.element,
+  loading: p.bool,
+  alert: p.bool,
+  confirm: p.bool,
+  maxWidth: p.string,
+
+  // disables form content padding
+  disableGutters: p.bool,
+
+  // overrides any of the main action button titles with this specific text
+  primaryActionLabel: p.string,
+
+  // Callback fired when the dialog has exited.
+  onClose: p.func,
+
+  onSubmit: p.func,
+
+  // if onNext is specified the submit button will be replaced with a 'Next' button
+  onNext: p.func,
+  // if onBack is specified the cancel button will be replaced with a 'Back' button
+  onBack: p.func,
+
+  // allow the dialog to grow beyond the normal max-width.
+  grow: p.bool,
+
+  // If true, the dialog will be full-screen
+  fullScreen: p.bool,
+
+  // notices to render; see details/Notices.tsx
+  notices: p.arrayOf(p.object),
+}
+
+FormDialog.defaultProps = {
+  errors: [],
+  onClose: () => {},
+  onSubmit: () => {},
+  loading: false,
+  confirm: false,
+  caption: '',
+  maxWidth: 'sm',
+}
+
+export default FormDialog

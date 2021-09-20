@@ -11,6 +11,7 @@ import (
 
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/graphql2"
+	"github.com/target/goalert/notificationchannel"
 	"github.com/target/goalert/oncall"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/schedule"
@@ -22,8 +23,43 @@ import (
 )
 
 type Schedule App
+type TemporarySchedule App
+type OnCallNotificationRule App
 
-func (a *App) Schedule() graphql2.ScheduleResolver { return (*Schedule)(a) }
+func (a *App) Schedule() graphql2.ScheduleResolver                   { return (*Schedule)(a) }
+func (a *App) TemporarySchedule() graphql2.TemporaryScheduleResolver { return (*TemporarySchedule)(a) }
+func (a *App) OnCallNotificationRule() graphql2.OnCallNotificationRuleResolver {
+	return (*OnCallNotificationRule)(a)
+}
+
+func (a *OnCallNotificationRule) Target(ctx context.Context, raw *schedule.OnCallNotificationRule) (*assignment.RawTarget, error) {
+	ch, err := a.NCStore.FindOne(ctx, raw.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+
+	if ch.Type == notificationchannel.TypeSlack {
+		return &assignment.RawTarget{
+			Type: assignment.TargetTypeSlackChannel,
+			ID:   ch.Value,
+			Name: ch.Name,
+		}, nil
+	}
+
+	return &assignment.RawTarget{Type: assignment.TargetTypeNotificationChannel, ID: ch.ID}, nil
+}
+
+func (a *TemporarySchedule) Shifts(ctx context.Context, temp *schedule.TemporarySchedule) ([]oncall.Shift, error) {
+	result := make([]oncall.Shift, 0, len(temp.Shifts))
+	for _, s := range temp.Shifts {
+		result = append(result, oncall.Shift{
+			UserID: s.UserID,
+			Start:  s.Start,
+			End:    s.End,
+		})
+	}
+	return result, nil
+}
 
 func (q *Query) Schedule(ctx context.Context, id string) (*schedule.Schedule, error) {
 	return (*App)(q).FindOneSchedule(ctx, id)
@@ -38,6 +74,21 @@ func (s *Schedule) Shifts(ctx context.Context, raw *schedule.Schedule, start, en
 	return s.OnCallStore.HistoryBySchedule(ctx, raw.ID, start, end)
 }
 
+func (s *Schedule) TemporarySchedules(ctx context.Context, raw *schedule.Schedule) ([]schedule.TemporarySchedule, error) {
+	id, err := parseUUID("ScheduleID", raw.ID)
+	if err != nil {
+		return nil, err
+	}
+	return s.ScheduleStore.TemporarySchedules(ctx, nil, id)
+}
+func (s *Schedule) OnCallNotificationRules(ctx context.Context, raw *schedule.Schedule) ([]schedule.OnCallNotificationRule, error) {
+	id, err := parseUUID("ScheduleID", raw.ID)
+	if err != nil {
+		return nil, err
+	}
+	return s.ScheduleStore.OnCallNotificationRules(ctx, nil, id)
+}
+
 func (s *Schedule) Target(ctx context.Context, raw *schedule.Schedule, input assignment.RawTarget) (*graphql2.ScheduleTarget, error) {
 	rules, err := s.RuleStore.FindByTargetTx(ctx, nil, raw.ID, input)
 	if err != nil {
@@ -46,7 +97,7 @@ func (s *Schedule) Target(ctx context.Context, raw *schedule.Schedule, input ass
 
 	return &graphql2.ScheduleTarget{
 		ScheduleID: raw.ID,
-		Target:     input,
+		Target:     &input,
 		Rules:      rules,
 	}, nil
 }
@@ -65,8 +116,9 @@ func (s *Schedule) Targets(ctx context.Context, raw *schedule.Schedule) ([]graph
 
 	result := make([]graphql2.ScheduleTarget, 0, len(m))
 	for tgt, rules := range m {
+		t := tgt // need to make a copy so we can take a pointer
 		result = append(result, graphql2.ScheduleTarget{
-			Target:     tgt,
+			Target:     &t,
 			ScheduleID: raw.ID,
 			Rules:      rules,
 		})
@@ -199,6 +251,14 @@ func (m *Mutation) CreateSchedule(ctx context.Context, input graphql2.CreateSche
 			}
 		}
 
+		for i, override := range input.NewUserOverrides {
+			override.ScheduleID = &sched.ID
+			_, err = m.CreateUserOverride(ctx, override)
+			if err != nil {
+				return validation.AddPrefix("newUserOverride["+strconv.Itoa(i)+"].", err)
+			}
+		}
+
 		return nil
 	})
 
@@ -244,6 +304,7 @@ func (q *Query) Schedules(ctx context.Context, opts *graphql2.ScheduleSearchOpti
 		return nil, err
 	}
 	conn = new(graphql2.ScheduleConnection)
+	conn.PageInfo = &graphql2.PageInfo{}
 	if len(scheds) == searchOpts.Limit {
 		scheds = scheds[:len(scheds)-1]
 		conn.PageInfo.HasNextPage = true

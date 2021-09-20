@@ -3,10 +3,11 @@ package engine
 import (
 	"context"
 	"database/sql"
+
 	"github.com/target/goalert/util"
 	"github.com/target/goalert/validation/validate"
 
-	uuid "github.com/satori/go.uuid"
+	"github.com/google/uuid"
 )
 
 type backend struct {
@@ -14,7 +15,12 @@ type backend struct {
 
 	findOne *sql.Stmt
 
+	trackStatus *sql.Stmt
+
 	clientID string
+
+	validCM *sql.Stmt
+	validNC *sql.Stmt
 }
 
 func newBackend(db *sql.DB) (*backend, error) {
@@ -22,16 +28,25 @@ func newBackend(db *sql.DB) (*backend, error) {
 
 	return &backend{
 		db:       db,
-		clientID: uuid.NewV4().String(),
+		clientID: uuid.New().String(),
 
 		findOne: p.P(`
 			SELECT
 				id,
 				alert_id,
+				service_id,
 				contact_method_id
 			FROM outgoing_messages
 			WHERE id = $1
 		`),
+
+		trackStatus: p.P(`
+			insert into alert_status_subscriptions (channel_id, contact_method_id, alert_id, last_alert_status)
+			values ($1, $2, $3, 'triggered')
+		`),
+
+		validCM: p.P(`select true from user_contact_methods where disabled = false and type = $1 and value = $2`),
+		validNC: p.P(`select true from notification_channels where type = $1 and value = $2`),
 	}, p.Err
 }
 
@@ -40,10 +55,15 @@ func (b *backend) FindOne(ctx context.Context, id string) (*callback, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var c callback
-	err = b.findOne.QueryRowContext(ctx, id).Scan(c.fields()...)
+	var alertID sql.NullInt64
+	var serviceID sql.NullString
+	err = b.findOne.QueryRowContext(ctx, id).Scan(&c.ID, &alertID, &serviceID, &c.ContactMethodID)
 	if err != nil {
 		return nil, err
 	}
+	c.AlertID = int(alertID.Int64)
+	c.ServiceID = serviceID.String
 	return &c, nil
 }

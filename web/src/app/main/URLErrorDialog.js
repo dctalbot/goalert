@@ -1,20 +1,23 @@
 import React from 'react'
 import { urlParamSelector } from '../selectors'
 import { connect } from 'react-redux'
-import FormDialog from '../dialogs/FormDialog'
 import { resetURLParams } from '../actions'
+import { Dialog, DialogContent, DialogActions } from '@material-ui/core'
+import DialogTitleWrapper from '../dialogs/components/DialogTitleWrapper'
+import DialogContentError from '../dialogs/components/DialogContentError'
+import LoadingButton from '../loading/components/LoadingButton'
 
 @connect(
-  state => ({
+  (state) => ({
     errorMessage: urlParamSelector(state)('errorMessage'),
     errorTitle: urlParamSelector(state)('errorTitle'),
   }),
-  dispatch => ({
+  (dispatch) => ({
     resetError: () => dispatch(resetURLParams('errorMessage', 'errorTitle')),
   }),
 )
 export default class URLErrorDialog extends React.Component {
-  onClose = () => {
+  handleDialogClose = () => {
     this.props.resetError()
   }
 
@@ -24,17 +27,31 @@ export default class URLErrorDialog extends React.Component {
 
     return (
       open && (
-        <FormDialog
-          alert
-          errors={[
-            {
-              message: errorMessage || 'Oops! Something went wrong.',
-            },
-          ]}
-          maxWidth='sm'
-          onClose={this.onClose}
-          title={errorTitle || 'An error occurred'}
-        />
+        <Dialog
+          open={open}
+          onClose={(_, r) => {
+            if (r === 'backdropClick') return
+            this.onClose()
+          }}
+          aria-labelledby='alert-dialog-title'
+          aria-describedby='alert-dialog-description'
+        >
+          <DialogTitleWrapper id='alert-dialog-title' title={errorTitle} />
+          <DialogContent>
+            <DialogContentError
+              id='alert-dialog-description'
+              error={errorMessage}
+              noPadding
+            />
+          </DialogContent>
+          <DialogActions>
+            <LoadingButton
+              buttonText='Okay'
+              color='primary'
+              onClick={() => this.onClose()}
+            />
+          </DialogActions>
+        </Dialog>
       )
     )
   }

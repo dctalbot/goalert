@@ -6,9 +6,9 @@ type Target interface {
 	TargetID() string
 }
 type RawTarget struct {
-	Type TargetType `json:"target_type"`
-	ID   string     `json:"target_id"`
-	Name string     `json:"target_name"`
+	Type TargetType
+	ID   string
+	Name string `json:"-"`
 }
 
 func NewRawTarget(t Target) RawTarget {
@@ -57,6 +57,10 @@ type (
 	NotificationRuleTarget string
 	// HeartbeatMonitorTarget implements the Target interface by wrapping a HeartbeatMonitor ID.
 	HeartbeatMonitorTarget string
+	// CalendarSubscriptionTarget implements the Target interface by wrapping a CalendarSubscription ID.
+	CalendarSubscriptionTarget string
+	// UserSessionTarget implements the Target interface by wrapping a UserSession ID.
+	UserSessionTarget string
 )
 
 // TargetType implements the Target interface.
@@ -120,6 +124,12 @@ func (ContactMethodTarget) TargetType() TargetType { return TargetTypeContactMet
 func (k ContactMethodTarget) TargetID() string { return string(k) }
 
 // TargetType implements the Target interface.
+func (CalendarSubscriptionTarget) TargetType() TargetType { return TargetTypeCalendarSubscription }
+
+// TargetID implements the Target interface.
+func (k CalendarSubscriptionTarget) TargetID() string { return string(k) }
+
+// TargetType implements the Target interface.
 func (NotificationRuleTarget) TargetType() TargetType { return TargetTypeNotificationRule }
 
 // TargetID implements the Target interface.
@@ -130,3 +140,9 @@ func (HeartbeatMonitorTarget) TargetType() TargetType { return TargetTypeHeartbe
 
 // TargetID implements the Target interface.
 func (k HeartbeatMonitorTarget) TargetID() string { return string(k) }
+
+// TargetType implements the Target interface.
+func (UserSessionTarget) TargetType() TargetType { return TargetTypeUserSession }
+
+// TargetID implements the Target interface.
+func (s UserSessionTarget) TargetID() string { return string(s) }

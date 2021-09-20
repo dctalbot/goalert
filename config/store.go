@@ -7,16 +7,18 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/target/goalert/keyring"
-	"github.com/target/goalert/permission"
-	"github.com/target/goalert/util"
-	"github.com/target/goalert/util/errutil"
-	"github.com/target/goalert/util/log"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/target/goalert/keyring"
+	"github.com/target/goalert/permission"
+	"github.com/target/goalert/util"
+	"github.com/target/goalert/util/errutil"
+	"github.com/target/goalert/util/jsonutil"
+	"github.com/target/goalert/util/log"
 
 	"github.com/pkg/errors"
 )
@@ -32,6 +34,8 @@ type Store struct {
 	latestConfig *sql.Stmt
 	setConfig    *sql.Stmt
 	lock         *sql.Stmt
+
+	closeCh chan struct{}
 }
 
 // NewStore will create a new Store with the given parameters. It will automatically detect
@@ -46,6 +50,7 @@ func NewStore(ctx context.Context, db *sql.DB, keys keyring.Keys, fallbackURL st
 		setConfig:    p.P(`insert into config (id, schema, data) values (DEFAULT, $1, $2) returning (id)`),
 		lock:         p.P(`lock config in exclusive mode`),
 		keys:         keys,
+		closeCh:      make(chan struct{}),
 	}
 	if p.Err != nil {
 		return nil, p.Err
@@ -73,18 +78,34 @@ func NewStore(ctx context.Context, db *sql.DB, keys keyring.Keys, fallbackURL st
 			return 30*time.Second + time.Duration(src.Int63n(int64(30*time.Second)))
 		}
 		t := time.NewTimer(randDelay())
-		for range t.C {
-			t.Reset(randDelay())
-			permission.SudoContext(context.Background(), func(ctx context.Context) {
-				err := s.Reload(ctx)
-				if err != nil {
-					log.Log(ctx, errors.Wrap(err, "config auto-reload"))
-				}
-			})
+		for {
+			select {
+			case <-t.C:
+				t.Reset(randDelay())
+				permission.SudoContext(context.Background(), func(ctx context.Context) {
+					err := s.Reload(ctx)
+					if err != nil {
+						log.Log(ctx, errors.Wrap(err, "config auto-reload"))
+					}
+				})
+			case s.closeCh <- struct{}{}:
+				close(s.closeCh)
+				return
+			}
 		}
 	}()
 
 	return s, nil
+}
+
+// Shutdown stops the config reloader.
+func (s *Store) Shutdown(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.closeCh:
+	}
+	return nil
 }
 
 func wrapTx(ctx context.Context, tx *sql.Tx, stmt *sql.Stmt) *sql.Stmt {
@@ -139,7 +160,7 @@ func (s *Store) ServeConfig(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	case "PUT":
-		data, err := ioutil.ReadAll(req.Body)
+		data, err := io.ReadAll(req.Body)
 		if errutil.HTTPError(ctx, w, err) {
 			return
 		}
@@ -169,7 +190,7 @@ func (s *Store) ConfigData(ctx context.Context, tx *sql.Tx) (id, schemaVersion i
 	}
 
 	err = wrapTx(ctx, tx, s.latestConfig).QueryRowContext(ctx, SchemaVersion).Scan(&id, &data, &schemaVersion)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, SchemaVersion, []byte("{}"), nil
 	}
 	if err != nil {
@@ -282,12 +303,7 @@ func (s *Store) updateConfigTx(ctx context.Context, tx *sql.Tx, fn func(Config) 
 		return 0, err
 	}
 
-	data, err := json.Marshal(newCfg)
-	if err != nil {
-		return 0, errors.Wrap(err, "marshal config")
-	}
-
-	data, err = mergeJSON(cfg.data, data)
+	data, err := jsonutil.Apply(cfg.data, newCfg)
 	if err != nil {
 		return 0, errors.Wrap(err, "merge config")
 	}
@@ -299,6 +315,7 @@ func (s *Store) updateConfigTx(ctx context.Context, tx *sql.Tx, fn func(Config) 
 func (s *Store) Config() Config {
 	s.mx.RLock()
 	cfg := s.rawCfg
+
 	s.mx.RUnlock()
 	return cfg
 }

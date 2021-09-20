@@ -1,4 +1,5 @@
 schema: ./schema.graphql
+omit_slice_element_pointers: true
 exec:
   filename: generated.go
 model:
@@ -15,6 +16,9 @@ models:
         fieldName: AlertStatusCMID
   UserContactMethod:
     model: github.com/target/goalert/user/contactmethod.ContactMethod
+    fields:
+      value:
+        resolver: true
   UserNotificationRule:
     model: github.com/target/goalert/user/notificationrule.NotificationRule
   Target:
@@ -29,7 +33,7 @@ models:
   Alert:
     model: github.com/target/goalert/alert.Alert
   AlertLogEntry:
-    model: github.com/target/goalert/alert/log.Entry  
+    model: github.com/target/goalert/alert/log.Entry
   AlertState:
     model: github.com/target/goalert/alert.State
   Service:
@@ -42,6 +46,8 @@ models:
     model: github.com/target/goalert/schedule/rotation.Rotation
   Schedule:
     model: github.com/target/goalert/schedule.Schedule
+  UserCalendarSubscription:
+    model: github.com/target/goalert/calendarsubscription.CalendarSubscription
   ServiceOnCallUser:
     model: github.com/target/goalert/oncall.ServiceOnCallUser
   EscalationPolicyStep:
@@ -53,7 +59,7 @@ models:
   Label:
     model: github.com/target/goalert/label.Label
   ClockTime:
-    model: github.com/target/goalert/graphql2.ClockTime
+    model: github.com/target/goalert/util/timeutil.Clock
   ScheduleRule:
     model: github.com/target/goalert/schedule/rule.Rule
   UserOverride:
@@ -68,3 +74,28 @@ models:
     model: github.com/target/goalert/heartbeat.Monitor
   HeartbeatMonitorState:
     model: github.com/target/goalert/heartbeat.State
+  SystemLimitID:
+    model: github.com/target/goalert/limit.ID
+  DebugCarrierInfo:
+    model: github.com/target/goalert/notification/twilio.CarrierInfo
+  UserSession:
+    model: github.com/target/goalert/auth.UserSession
+  Notice:
+    model: github.com/target/goalert/notice.Notice
+  NoticeType:
+    model: github.com/target/goalert/notice.Type
+  SetScheduleShiftInput:
+    model: github.com/target/goalert/schedule.FixedShift
+  TemporarySchedule:
+    model: github.com/target/goalert/schedule.TemporarySchedule
+  OnCallNotificationRule:
+    model: github.com/target/goalert/schedule.OnCallNotificationRule
+  OnCallNotificationRuleInput:
+    model: github.com/target/goalert/graphql2.OnCallNotificationRuleInput
+  WeekdayFilter:
+    model: github.com/target/goalert/util/timeutil.WeekdayFilter
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.ID
+      - github.com/google/uuid.UUID
+      - github.com/target/goalert/schedule.RuleID

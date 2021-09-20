@@ -79,7 +79,7 @@ func TestMailgunAlerts(t *testing.T) {
 		return
 	}
 
-	h.Twilio().Device(h.Phone("1")).ExpectSMS("test alert")
+	h.Twilio(t).Device(h.Phone("1")).ExpectSMS("test alert")
 
 	v.Set("subject", "second alert")
 	resp, err = http.PostForm(h.URL()+"/v1/webhooks/mailgun", v)
@@ -88,7 +88,16 @@ func TestMailgunAlerts(t *testing.T) {
 		return
 	}
 
-	h.Twilio().Device(h.Phone("1")).ExpectSMS("second alert")
+	h.Twilio(t).Device(h.Phone("1")).ExpectSMS("second alert")
+
+	v.Set("recipient", "w"+h.UUID("intkey")+"@"+cfg.Mailgun.EmailDomain)
+	resp, err = http.PostForm(h.URL()+"/api/v2/mailgun/incoming", v)
+	assert.Nil(t, err)
+	if !assert.Equal(t, 406, resp.StatusCode, "reject invalid address with 406 (v2 URL)") {
+		return
+	}
+	// restore
+	v.Set("recipient", h.UUID("intkey")+"@"+cfg.Mailgun.EmailDomain)
 
 	v.Set("body-plain", strings.Repeat("too big", 1<<20)) // ~7MiB
 

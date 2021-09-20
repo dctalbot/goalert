@@ -12,9 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/target/goalert/alert"
 	"github.com/target/goalert/auth"
+	"github.com/target/goalert/auth/authtoken"
 	"github.com/target/goalert/config"
 	"github.com/target/goalert/integrationkey"
 	"github.com/target/goalert/permission"
@@ -37,11 +39,11 @@ func httpError(ctx context.Context, w http.ResponseWriter, err error) bool {
 		return false
 	}
 
-	type clientErr interface {
+	var clientErr interface {
 		ClientError() bool
 	}
 
-	if e, ok := err.(clientErr); ok && e.ClientError() {
+	if errors.As(err, &clientErr) && clientErr.ClientError() {
 		log.Debug(ctx, err)
 		http.Error(w, err.Error(), http.StatusNotAcceptable)
 		return true
@@ -91,7 +93,7 @@ func (h *ingressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.Form == nil {
 		err := r.ParseMultipartForm(32 << 20)
-		if err != nil && err != http.ErrNotMultipart {
+		if err != nil && !errors.Is(err, http.ErrNotMultipart) {
 			http.Error(w, err.Error(), http.StatusNotAcceptable)
 			return
 		}
@@ -122,7 +124,6 @@ func (h *ingressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// split address
 	parts := strings.SplitN(recipient, "@", 2)
-	mailboxName := parts[0]
 	domain := strings.ToLower(parts[1])
 	if domain != cfg.Mailgun.EmailDomain {
 		httpError(ctx, w, validation.NewFieldError("domain", "invalid domain"))
@@ -130,20 +131,24 @@ func (h *ingressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// support for dedup key
-	parts = strings.SplitN(mailboxName, "+", 2)
-	mailboxName = parts[0]
+	parts = strings.SplitN(parts[0], "+", 2)
+	err = validate.UUID("recipient", parts[0])
+	if httpError(ctx, w, errors.Wrap(err, "bad mailbox name")) {
+		return
+	}
+
+	tokID, err := uuid.Parse(parts[0])
+	if httpError(ctx, w, err) {
+		return
+	}
+
+	tok := authtoken.Token{ID: tokID}
 	var dedupStr string
 	if len(parts) > 1 {
 		dedupStr = parts[1]
 	}
 
-	// validate UUID
-	err = validate.UUID("recipient", mailboxName)
-	if httpError(ctx, w, errors.Wrap(err, "bad mailbox name")) {
-		return
-	}
-
-	ctx = log.WithField(ctx, "IntegrationKey", mailboxName)
+	ctx = log.WithField(ctx, "IntegrationKey", tok.ID.String())
 
 	summary := validate.SanitizeText(r.FormValue("subject"), alert.MaxSummaryLength)
 	details := fmt.Sprintf("From: %s\n\n%s", r.FormValue("from"), r.FormValue("body-plain"))
@@ -158,7 +163,7 @@ func (h *ingressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	err = retry.DoTemporaryError(func(_ int) error {
 		if newAlert.ServiceID == "" {
-			ctx, err = h.intKeys.Authorize(ctx, mailboxName, integrationkey.TypeEmail)
+			ctx, err = h.intKeys.Authorize(ctx, tok, integrationkey.TypeEmail)
 			newAlert.ServiceID = permission.ServiceID(ctx)
 		}
 		if err != nil {

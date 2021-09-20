@@ -32,7 +32,7 @@ func (h *Handler) ServeUserAvatar(w http.ResponseWriter, req *http.Request) {
 
 	ctx := req.Context()
 	u, err := h.c.UserStore.FindOne(ctx, userID)
-	if errors.Cause(err) == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		http.NotFound(w, req)
 		return
 	}
@@ -56,13 +56,13 @@ func (h *Handler) ServeHeartbeatCheck(w http.ResponseWriter, r *http.Request) {
 	monitorID := parts[len(parts)-1]
 
 	err := retry.DoTemporaryError(func(_ int) error {
-		return h.c.HeartbeatStore.Heartbeat(ctx, monitorID)
+		return h.c.HeartbeatStore.RecordHeartbeat(ctx, monitorID)
 	},
 		retry.Log(ctx),
 		retry.Limit(12),
 		retry.FibBackoff(time.Second),
 	)
-	if errors.Cause(err) == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		auth.Delay(ctx)
 		http.NotFound(w, r)
 		return

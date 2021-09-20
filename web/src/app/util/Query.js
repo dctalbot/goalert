@@ -1,34 +1,14 @@
 import React from 'react'
 import p from 'prop-types'
-
-import { Query as ApolloQuery } from 'react-apollo'
+import { Query as ApolloQuery } from '@apollo/client/react/components'
 import Spinner from '../loading/components/Spinner'
-import { isEmpty } from 'lodash-es'
+import { isEmpty } from 'lodash'
 import { GenericError, ObjectNotFound } from '../error-pages/Errors'
 
 import { POLL_ERROR_INTERVAL, POLL_INTERVAL } from '../config'
 
-const hasNull = data =>
-  isEmpty(data) || Object.keys(data).some(key => data[key] === null)
-
-export function withQuery(
-  query,
-  mapQueryToProps,
-  mapPropsToQueryProps = () => ({}),
-) {
-  return Component =>
-    function WithQuery(componentProps) {
-      return (
-        <Query
-          {...mapPropsToQueryProps(componentProps)}
-          query={query}
-          render={renderProps => (
-            <Component {...componentProps} {...mapQueryToProps(renderProps)} />
-          )}
-        />
-      )
-    }
-}
+const hasNull = (data) =>
+  isEmpty(data) || Object.keys(data).some((key) => data[key] === null)
 
 export default class Query extends React.PureComponent {
   static propTypes = {
@@ -75,7 +55,7 @@ export default class Query extends React.PureComponent {
     )
   }
 
-  renderResult = args => {
+  renderResult = (args) => {
     if (this.state.spin) {
       if (this.props.noSpin)
         return this.props.render({ ...args, loading: true })
@@ -94,7 +74,7 @@ export default class Query extends React.PureComponent {
       return this.props.render(args)
     }
 
-    if (loading) {
+    if (!data && loading) {
       if (this.props.partialQuery) {
         try {
           const data = this.props.client.readQuery({
@@ -135,13 +115,12 @@ export default class Query extends React.PureComponent {
       render,
       noPoll,
       partialQuery,
-
       // and default-override ones
       client,
       fetchPolicy,
-
       ...rest
     } = this.props
+
     return (
       <ApolloQuery
         client={client}
@@ -152,4 +131,23 @@ export default class Query extends React.PureComponent {
       </ApolloQuery>
     )
   }
+}
+
+export function withQuery(
+  query,
+  mapQueryToProps,
+  mapPropsToQueryProps = () => ({}),
+) {
+  return (Component) =>
+    function WithQuery(componentProps) {
+      return (
+        <Query
+          {...mapPropsToQueryProps(componentProps)}
+          query={query}
+          render={(renderProps) => (
+            <Component {...componentProps} {...mapQueryToProps(renderProps)} />
+          )}
+        />
+      )
+    }
 }

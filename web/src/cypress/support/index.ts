@@ -13,9 +13,10 @@
 // https://on.cypress.io/configuration
 // ***********************************************************
 
-// Import commands.js using ES2015 syntax:
-
+import './slack'
 import './alert'
+import './calendar-subscription'
+import './fail-fast'
 import './service'
 import './ep'
 import './rotation'
@@ -25,16 +26,20 @@ import './profile'
 import './schedule'
 import './select-by-label'
 import './menu'
-import './navitage-to-and-from'
+import './navigate-to-and-from'
 import './page-search'
 import './page-action'
 import './page-nav'
 import './page-fab'
-import './config'
+import './sql'
+import './form'
+import './dialog'
 
+Cypress.Cookies.defaults({
+  preserve: 'goalert_session.2',
+})
+Cypress.Cookies.debug(true)
+
+export * from './config'
+export * from './limits'
 export * from './util'
-
-import './fail-fast'
-
-// Alternatively you can use CommonJS syntax:
-// require('./commands')

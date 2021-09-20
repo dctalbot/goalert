@@ -1,16 +1,16 @@
 import React, { useState } from 'react'
+import { gql, useQuery, useMutation } from '@apollo/client'
 import p from 'prop-types'
-import { useDispatch } from 'react-redux'
-import gql from 'graphql-tag'
-import { useQuery, useMutation } from 'react-apollo'
+
 import { fieldErrors, nonFieldErrors } from '../util/errutil'
 import Checkbox from '@material-ui/core/Checkbox'
 import FormControlLabel from '@material-ui/core/FormControlLabel'
 import FormControl from '@material-ui/core/FormControl'
 import FormHelperText from '@material-ui/core/FormHelperText'
+import Typography from '@material-ui/core/Typography'
 import FormDialog from '../dialogs/FormDialog'
 import Spinner from '../loading/components/Spinner'
-import { push } from 'connected-react-router'
+import _ from 'lodash'
 
 function DeleteForm({ epName, error, value, onChange }) {
   return (
@@ -19,18 +19,22 @@ function DeleteForm({ epName, error, value, onChange }) {
         control={
           <Checkbox
             checked={value}
-            onChange={e => onChange(e.target.checked)}
+            onChange={(e) => onChange(e.target.checked)}
             value='delete-escalation-policy'
           />
         }
-        label={`Also delete escalation policy: ${epName}`}
+        label={
+          <React.Fragment>
+            Also delete escalation policy: {epName}
+          </React.Fragment>
+        }
       />
       <FormHelperText>{error}</FormHelperText>
     </FormControl>
   )
 }
 DeleteForm.propTypes = {
-  epName: p.string.isRequired,
+  epName: p.node.isRequired,
   error: p.string,
   value: p.bool,
   onChange: p.func.isRequired,
@@ -41,8 +45,7 @@ const query = gql`
     service(id: $id) {
       id
       name
-      escalationPolicyID
-      escalationPolicy {
+      ep: escalationPolicy {
         id
         name
       }
@@ -57,25 +60,25 @@ const mutation = gql`
 
 export default function ServiceDeleteDialog({ serviceID, onClose }) {
   const [deleteEP, setDeleteEP] = useState(true)
-  const { data, loading: dataLoading } = useQuery(query, {
+  const { data, ...dataStatus } = useQuery(query, {
     variables: { id: serviceID },
   })
   const input = [{ type: 'service', id: serviceID }]
-  const dispatch = useDispatch()
-  const refetch = ['servicesQuery']
-  const [deleteService, { loading, error }] = useMutation(mutation, {
+  const [deleteService, deleteServiceStatus] = useMutation(mutation, {
     variables: { input },
-    refetchQueries: refetch,
-    onCompleted: () => dispatch(push('/services')),
   })
 
-  if (dataLoading) return <Spinner />
+  const epID = _.get(data, 'service.ep.id')
+  const epName = _.get(
+    data,
+    'service.ep.name',
+    <Spinner text='fetching policy...' />,
+  )
 
   if (deleteEP) {
-    refetch.push('epsQuery')
     input.push({
       type: 'escalationPolicy',
-      id: data.service.escalationPolicyID,
+      id: epID,
     })
   }
 
@@ -83,20 +86,26 @@ export default function ServiceDeleteDialog({ serviceID, onClose }) {
     <FormDialog
       title='Are you sure?'
       confirm
-      subTitle={`This will delete the service: ${data.service.name}`}
+      subTitle={
+        <Typography>
+          This will delete the service:{' '}
+          {_.get(data, 'service.name', <Spinner text='loading...' />)}
+        </Typography>
+      }
       caption='Deleting a service will also delete all associated integration keys and alerts.'
-      loading={loading}
-      errors={nonFieldErrors(error)}
+      loading={deleteServiceStatus.loading || (!data && dataStatus.loading)}
+      errors={nonFieldErrors(deleteServiceStatus.error)}
       onClose={onClose}
       onSubmit={() => deleteService()}
       form={
         <DeleteForm
-          epName={data.service.escalationPolicy.name}
+          epName={epName}
           error={
-            fieldErrors(error).find(f => f.field === 'escalationPolicyID') &&
-            'Escalation policy is currently in use.'
+            fieldErrors(deleteServiceStatus.error).find(
+              (f) => f.field === 'escalationPolicyID',
+            ) && 'Escalation policy is currently in use.'
           }
-          onChange={deleteEP => setDeleteEP(deleteEP)}
+          onChange={(deleteEP) => setDeleteEP(deleteEP)}
           value={deleteEP}
         />
       }

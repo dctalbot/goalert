@@ -1,15 +1,16 @@
-import React from 'react'
+import React, { useState } from 'react'
+import { gql, useQuery, useMutation } from '@apollo/client'
 import p from 'prop-types'
-import gql from 'graphql-tag'
-import Query from '../util/Query'
-import { Mutation } from 'react-apollo'
+
 import { SetFavoriteButton } from './SetFavoriteButton'
 import { oneOfShape } from '../util/propTypes'
+import { Button, Dialog, DialogActions, DialogTitle } from '@material-ui/core'
+import DialogContentError from '../dialogs/components/DialogContentError'
 
 const queries = {
   service: gql`
     query serviceFavQuery($id: ID!) {
-      service(id: $id) {
+      data: service(id: $id) {
         id
         isFavorite
       }
@@ -17,7 +18,7 @@ const queries = {
   `,
   rotation: gql`
     query rotationFavQuery($id: ID!) {
-      rotation(id: $id) {
+      data: rotation(id: $id) {
         id
         isFavorite
       }
@@ -25,7 +26,15 @@ const queries = {
   `,
   schedule: gql`
     query scheduleFavQuery($id: ID!) {
-      schedule(id: $id) {
+      data: schedule(id: $id) {
+        id
+        isFavorite
+      }
+    }
+  `,
+  escalationPolicy: gql`
+    query escalationPolicyFavQuery($id: ID!) {
+      data: escalationPolicy(id: $id) {
         id
         isFavorite
       }
@@ -40,8 +49,7 @@ const mutation = gql`
 `
 
 export function QuerySetFavoriteButton(props) {
-  let typeName = ''
-  let id = ''
+  let id, typeName
   if (props.rotationID) {
     typeName = 'rotation'
     id = props.rotationID
@@ -51,46 +59,51 @@ export function QuerySetFavoriteButton(props) {
   } else if (props.scheduleID) {
     typeName = 'schedule'
     id = props.scheduleID
+  } else if (props.escalationPolicyID) {
+    typeName = 'escalationPolicy'
+    id = props.escalationPolicyID
   } else {
-    return null
+    throw new Error('unknown type')
   }
-  return (
-    <Query
-      query={queries[typeName]}
-      variables={{ id: id }}
-      render={({ data }) => {
-        if (!data || !data[typeName]) return null
+  const { data, loading } = useQuery(queries[typeName], {
+    variables: { id },
+  })
+  const isFavorite = data && data.data && data.data.isFavorite
+  const [showMutationErrorDialog, setShowMutationErrorDialog] = useState(false)
+  const [toggleFav, toggleFavStatus] = useMutation(mutation, {
+    variables: {
+      input: { target: { id, type: typeName }, favorite: !isFavorite },
+    },
+    onError: () => setShowMutationErrorDialog(true),
+  })
 
-        return renderMutation(data[typeName].isFavorite, id, typeName)
-      }}
-    />
-  )
-}
-
-function renderMutation(isFavorite, id, typeName) {
   return (
-    <Mutation mutation={mutation} refetchQueries={[`${typeName}FavQuery`]}>
-      {mutation => renderSetFavButton(isFavorite, mutation, id, typeName)}
-    </Mutation>
-  )
-}
-
-function renderSetFavButton(isFavorite, mutation, id, typeName) {
-  return (
-    <SetFavoriteButton
-      typeName={typeName}
-      isFavorite={isFavorite}
-      onSubmit={() => {
-        return mutation({
-          variables: {
-            input: {
-              target: { id, type: typeName },
-              favorite: !isFavorite,
-            },
-          },
-        })
-      }}
-    />
+    <React.Fragment>
+      <SetFavoriteButton
+        typeName={typeName}
+        isFavorite={isFavorite}
+        loading={!data && loading}
+        onClick={() => toggleFav()}
+      />
+      <Dialog
+        // if showMutationErrorDialog is true, the dialog will open
+        open={showMutationErrorDialog}
+        // onClose, reset showMutationErrorDialog to false
+        onClose={() => setShowMutationErrorDialog(false)}
+      >
+        <DialogTitle>An error occurred</DialogTitle>
+        <DialogContentError error={toggleFavStatus?.error?.message ?? ''} />
+        <DialogActions>
+          <Button
+            color='primary'
+            variant='contained'
+            onClick={() => setShowMutationErrorDialog(false)}
+          >
+            Okay
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </React.Fragment>
   )
 }
 
@@ -99,5 +112,6 @@ QuerySetFavoriteButton.propTypes = {
     serviceID: p.string,
     rotationID: p.string,
     scheduleID: p.string,
+    escalationPolicyID: p.string,
   }),
 }

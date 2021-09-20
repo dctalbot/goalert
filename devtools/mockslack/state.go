@@ -19,6 +19,7 @@ type state struct {
 	tokens     map[string]*AuthToken
 	users      map[string]*userState
 	tokenCodes map[string]*tokenCode
+	teamID     string
 }
 
 func newState() *state {
@@ -29,6 +30,7 @@ func newState() *state {
 		tokens:     make(map[string]*AuthToken),
 		users:      make(map[string]*userState),
 		tokenCodes: make(map[string]*tokenCode),
+		teamID:     genTeamID(),
 	}
 }
 
@@ -56,7 +58,7 @@ type channelState struct {
 }
 
 // SetAutoCreateChannel, if set to true, will cause messages sent to
-// non-existant channels to succeed by creating the channel automatically.
+// non-existent channels to succeed by creating the channel automatically.
 func (st *state) SetAutoCreateChannel(value bool) {
 	st.mx.Lock()
 	defer st.mx.Unlock()

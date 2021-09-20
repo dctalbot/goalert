@@ -1,9 +1,9 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
-	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestManualEscalation ensures that second step notifications are sent out when an acknowledged alert is manually escalated.
@@ -52,9 +52,8 @@ func TestManualEscalation(t *testing.T) {
 	h := harness.NewHarness(t, sql, "ids-to-uuids")
 	defer h.Close()
 
-	h.Delay(time.Second * 15)  // ensure first notification is not sent out
-	h.Twilio().WaitAndAssert() // phone 2 should not get SMS before escalating
+	h.Twilio(t).WaitAndAssert() // phone 2 should not get SMS before escalating
 	h.Escalate(1, 0)
 
-	h.Twilio().Device(h.Phone("2")).ExpectSMS("testing")
+	h.Twilio(t).Device(h.Phone("2")).ExpectSMS("testing")
 }

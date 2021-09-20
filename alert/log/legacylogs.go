@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func (e *rawEntry) subjectFromMessage() *Subject {
+func (e *Entry) subjectFromMessage() *Subject {
 	switch e._type {
 	case TypeCreated:
 		return createdSubject(e.message)
@@ -101,6 +101,8 @@ func createdSubject(msg string) *Subject {
 		return &Subject{Type: SubjectTypeIntegrationKey, Classifier: "Grafana"}
 	case "Created via: site24x7":
 		return &Subject{Type: SubjectTypeIntegrationKey, Classifier: "Site24x7"}
+	case "Created via: prometheusAlertmanager":
+		return &Subject{Type: SubjectTypeIntegrationKey, Classifier: "PrometheusAlertmanager"}
 	case "Created via: manual":
 		return &Subject{Type: SubjectTypeUser, Classifier: "Web"}
 	case "Created via: generic":

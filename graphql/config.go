@@ -2,6 +2,7 @@ package graphql
 
 import (
 	"database/sql"
+
 	"github.com/target/goalert/alert"
 	alertlog "github.com/target/goalert/alert/log"
 	"github.com/target/goalert/engine/resolver"
@@ -29,19 +30,19 @@ type Config struct {
 
 	AlertStore    alert.Store
 	AlertLogStore alertlog.Store
-	UserStore     user.Store
+	UserStore     *user.Store
 	CMStore       contactmethod.Store
 	NRStore       notificationrule.Store
 	ServiceStore  service.Store
 
-	ScheduleStore     schedule.Store
+	ScheduleStore     *schedule.Store
 	ScheduleRuleStore rule.Store
 	RotationStore     rotation.Store
 	ShiftCalc         shiftcalc.Calculator
 
 	EscalationStore     escalation.Store
 	IntegrationKeyStore integrationkey.Store
-	HeartbeatStore      heartbeat.Store
+	HeartbeatStore      *heartbeat.Store
 
 	LimitStore limit.Store
 

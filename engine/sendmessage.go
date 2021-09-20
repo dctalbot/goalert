@@ -2,118 +2,209 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+
+	"github.com/pkg/errors"
+	"github.com/target/goalert/alert"
 	alertlog "github.com/target/goalert/alert/log"
+	"github.com/target/goalert/engine/message"
 	"github.com/target/goalert/notification"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/util/log"
-
-	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 )
 
-func (p *Engine) sendMessage(ctx context.Context, msgID string, destType notification.DestType, destID string, disabledOK bool, fn func(notification.Dest) notification.Message, afterFn func(context.Context)) (*notification.MessageStatus, error) {
+func (p *Engine) sendMessage(ctx context.Context, msg *message.Message) (*notification.SendResult, error) {
 	ctx, sp := trace.StartSpan(ctx, "Engine.SendMessage")
 	defer sp.End()
 	sp.AddAttributes(
-		trace.StringAttribute("message.id", msgID),
-		trace.StringAttribute("dest.type", destType.String()),
-		trace.StringAttribute("dest.id", destID),
+		trace.StringAttribute("message.id", msg.ID),
+		trace.StringAttribute("message.type", msg.Type.String()),
+		trace.StringAttribute("dest.type", msg.Dest.Type.String()),
+		trace.StringAttribute("dest.id", msg.Dest.ID),
 	)
+	ctx = log.WithField(ctx, "CallbackID", msg.ID)
 
-	var dest notification.Dest
-	if destType.IsUserCM() {
-		cm, err := p.cfg.ContactMethodStore.FindOne(ctx, destID)
-		if err != nil {
-			return nil, errors.Wrap(err, "lookup contact method")
-		}
-		trace.FromContext(ctx).AddAttributes(trace.StringAttribute("message.contactMethod.value", cm.Value))
-
-		if !disabledOK && cm.Disabled {
-			return nil, errDisabledCM
-		}
-		dest.Type = cm.Type.DestType()
-		dest.Value = cm.Value
-		ctx = permission.UserSourceContext(ctx, cm.UserID, permission.RoleUser, &permission.SourceInfo{
+	if msg.Dest.Type.IsUserCM() {
+		ctx = permission.UserSourceContext(ctx, msg.UserID, permission.RoleUser, &permission.SourceInfo{
 			Type: permission.SourceTypeContactMethod,
-			ID:   cm.ID,
+			ID:   msg.Dest.ID,
 		})
 	} else {
-		ch, err := p.cfg.NCStore.FindOne(ctx, destID)
-		if err != nil {
-			return nil, errors.Wrap(err, "lookup notification channel")
-		}
-		dest.Type = ch.Type.DestType()
-		dest.Value = ch.Value
+		ctx = permission.SystemContext(ctx, "SendMessage")
 		ctx = permission.SourceContext(ctx, &permission.SourceInfo{
 			Type: permission.SourceTypeNotificationChannel,
-			ID:   ch.ID,
+			ID:   msg.Dest.ID,
 		})
 	}
 
-	msg := fn(dest)
+	var notifMsg notification.Message
+	var isFirstAlertMessage bool
+	switch msg.Type {
+	case notification.MessageTypeAlertBundle:
+		name, count, err := p.am.ServiceInfo(ctx, msg.ServiceID)
+		if err != nil {
+			return nil, errors.Wrap(err, "lookup service info")
+		}
+		if count == 0 {
+			// already acked/closed, don't send bundled notification
+			return &notification.SendResult{
+				ID: msg.ID,
+				Status: notification.Status{
+					Details: "alerts acked/closed before message sent",
+					State:   notification.StateFailedPerm,
+				},
+			}, nil
+		}
+		notifMsg = notification.AlertBundle{
+			Dest:        msg.Dest,
+			CallbackID:  msg.ID,
+			ServiceID:   msg.ServiceID,
+			ServiceName: name,
+			Count:       count,
+		}
+	case notification.MessageTypeAlert:
+		a, err := p.am.FindOne(ctx, msg.AlertID)
+		if err != nil {
+			return nil, errors.Wrap(err, "lookup alert")
+		}
+		stat, err := p.cfg.NotificationStore.OriginalMessageStatus(ctx, msg.AlertID, msg.Dest)
+		if err != nil {
+			return nil, fmt.Errorf("lookup original message: %w", err)
+		}
+		if stat != nil && stat.ID == msg.ID {
+			// set to nil if it's the current message
+			stat = nil
+		}
+		notifMsg = notification.Alert{
+			Dest:       msg.Dest,
+			AlertID:    msg.AlertID,
+			Summary:    a.Summary,
+			Details:    a.Details,
+			CallbackID: msg.ID,
 
-	ctx = log.WithField(ctx, "CallbackID", msgID)
+			OriginalStatus: stat,
+		}
+		isFirstAlertMessage = stat == nil
+	case notification.MessageTypeAlertStatus:
+		e, err := p.cfg.AlertLogStore.FindOne(ctx, msg.AlertLogID)
+		if err != nil {
+			return nil, errors.Wrap(err, "lookup alert log entry")
+		}
+		a, err := p.cfg.AlertStore.FindOne(ctx, msg.AlertID)
+		if err != nil {
+			return nil, fmt.Errorf("lookup original alert: %w", err)
+		}
+		stat, err := p.cfg.NotificationStore.OriginalMessageStatus(ctx, msg.AlertID, msg.Dest)
+		if err != nil {
+			return nil, fmt.Errorf("lookup original message: %w", err)
+		}
+		if stat == nil {
+			return nil, fmt.Errorf("could not find original notification for alert %d to %s", msg.AlertID, msg.Dest.String())
+		}
 
-	status, err := p.cfg.NotificationSender.Send(ctx, msg)
+		var status alert.Status
+		switch e.Type() {
+		case alertlog.TypeAcknowledged:
+			status = alert.StatusActive
+		case alertlog.TypeEscalated:
+			status = alert.StatusTriggered
+		case alertlog.TypeClosed:
+			status = alert.StatusClosed
+		}
+
+		notifMsg = notification.AlertStatus{
+			Dest:           msg.Dest,
+			AlertID:        e.AlertID(),
+			CallbackID:     msg.ID,
+			LogEntry:       e.String(),
+			Summary:        a.Summary,
+			Details:        a.Details,
+			NewAlertStatus: status,
+			OriginalStatus: *stat,
+		}
+	case notification.MessageTypeTest:
+		notifMsg = notification.Test{
+			Dest:       msg.Dest,
+			CallbackID: msg.ID,
+		}
+	case notification.MessageTypeVerification:
+		code, err := p.cfg.NotificationStore.Code(ctx, msg.VerifyID)
+		if err != nil {
+			return nil, errors.Wrap(err, "lookup verification code")
+		}
+		notifMsg = notification.Verification{
+			Dest:       msg.Dest,
+			CallbackID: msg.ID,
+			Code:       code,
+		}
+	case notification.MessageTypeScheduleOnCallUsers:
+		users, err := p.cfg.OnCallStore.OnCallUsersBySchedule(ctx, msg.ScheduleID)
+		if err != nil {
+			return nil, errors.Wrap(err, "lookup on call users by schedule")
+		}
+		sched, err := p.cfg.ScheduleStore.FindOne(ctx, msg.ScheduleID)
+		if err != nil {
+			return nil, errors.Wrap(err, "lookup schedule by id")
+		}
+
+		var onCallUsers []notification.User
+		for _, u := range users {
+			onCallUsers = append(onCallUsers, notification.User{
+				Name: u.Name,
+				ID:   u.ID,
+				URL:  p.cfg.ConfigSource.Config().CallbackURL("/users/" + u.ID),
+			})
+		}
+
+		notifMsg = notification.ScheduleOnCallUsers{
+			Dest:         msg.Dest,
+			CallbackID:   msg.ID,
+			ScheduleName: sched.Name,
+			ScheduleURL:  p.cfg.ConfigSource.Config().CallbackURL("/schedules/" + msg.ScheduleID),
+			ScheduleID:   msg.ScheduleID,
+			Users:        onCallUsers,
+		}
+	default:
+		log.Log(ctx, errors.New("SEND NOT IMPLEMENTED FOR MESSAGE TYPE"))
+		return &notification.SendResult{ID: msg.ID, Status: notification.Status{State: notification.StateFailedPerm}}, nil
+	}
+
+	meta := alertlog.NotificationMetaData{
+		MessageID: msg.ID,
+	}
+
+	res, err := p.cfg.NotificationManager.SendMessage(ctx, notifMsg)
 	if err != nil {
 		return nil, err
 	}
-	if afterFn != nil {
-		afterFn(ctx)
-	}
-	return status, nil
-}
 
-func (p *Engine) sendStatusUpdate(ctx context.Context, msgID string, alertLogID int, destType notification.DestType, destID string) (*notification.MessageStatus, error) {
-	e, err := p.cfg.AlertLogStore.FindOne(ctx, alertLogID)
-	if err != nil {
-		return nil, errors.Wrap(err, "lookup alert log entry")
+	switch msg.Type {
+	case notification.MessageTypeAlert:
+		p.cfg.AlertLogStore.MustLog(ctx, msg.AlertID, alertlog.TypeNotificationSent, meta)
+	case notification.MessageTypeAlertBundle:
+		err = p.cfg.AlertLogStore.LogServiceTx(ctx, nil, msg.ServiceID, alertlog.TypeNotificationSent, meta)
+		if err != nil {
+			log.Log(ctx, errors.Wrap(err, "append alert log"))
+		}
 	}
 
-	return p.sendMessage(ctx, msgID, destType, destID, false, func(dest notification.Dest) notification.Message {
-		return notification.AlertStatus{
-			Dest:      dest,
-			AlertID:   e.AlertID(),
-			MessageID: msgID,
-			Log:       e.String(),
+	if isFirstAlertMessage && res.State.IsOK() {
+		var chanID, cmID sql.NullString
+		if msg.Dest.Type.IsUserCM() {
+			cmID.Valid = true
+			cmID.String = msg.Dest.ID
+		} else {
+			chanID.Valid = true
+			chanID.String = msg.Dest.ID
 		}
-	}, nil)
-}
-func (p *Engine) sendNotification(ctx context.Context, msgID string, alertID int, destType notification.DestType, destID string) (*notification.MessageStatus, error) {
-	a, err := p.am.FindOne(ctx, alertID)
-	if err != nil {
-		return nil, errors.Wrap(err, "lookup alert")
+		_, err = p.b.trackStatus.ExecContext(ctx, chanID, cmID, msg.AlertID)
+		if err != nil {
+			// non-fatal, but log because it means status updates will not work for that alert/dest.
+			log.Log(ctx, fmt.Errorf("track status updates for alert #%d for %s: %w", msg.AlertID, msg.Dest.String(), err))
+		}
 	}
-	return p.sendMessage(ctx, msgID, destType, destID, false, func(dest notification.Dest) notification.Message {
-		return notification.Alert{
-			Dest:       dest,
-			AlertID:    a.ID,
-			Summary:    a.Summary,
-			Details:    a.Details,
-			CallbackID: msgID,
-		}
-	}, func(ctx context.Context) {
-		p.cfg.AlertLogStore.MustLog(ctx, alertID, alertlog.TypeNotificationSent, nil)
-	})
-}
-func (p *Engine) sendTestNotification(ctx context.Context, msgID string, destType notification.DestType, destID string) (*notification.MessageStatus, error) {
-	return p.sendMessage(ctx, msgID, destType, destID, false, func(dest notification.Dest) notification.Message {
-		return notification.Test{
-			Dest:       dest,
-			CallbackID: msgID,
-		}
-	}, nil)
-}
-func (p *Engine) sendVerificationMessage(ctx context.Context, msgID string, destType notification.DestType, destID, verifyID string) (*notification.MessageStatus, error) {
-	code, err := p.cfg.NotificationStore.Code(ctx, verifyID)
-	if err != nil {
-		return nil, errors.Wrap(err, "lookup verification code")
-	}
-	return p.sendMessage(ctx, msgID, destType, destID, true, func(dest notification.Dest) notification.Message {
-		return notification.Verification{
-			Dest:       dest,
-			CallbackID: msgID,
-			Code:       code,
-		}
-	}, nil)
+
+	return res, nil
 }

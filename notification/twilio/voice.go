@@ -22,6 +22,7 @@ import (
 	"github.com/target/goalert/retry"
 	"github.com/target/goalert/util/errutil"
 	"github.com/target/goalert/util/log"
+	"github.com/ttacon/libphonenumber"
 )
 
 // CallType indicates a supported Twilio voice call type.
@@ -61,18 +62,21 @@ var pRx = regexp.MustCompile(`\((.*?)\)`)
 
 // Voice implements a notification.Sender for Twilio voice calls.
 type Voice struct {
-	c   *Config
-	ban *dbBan
-
-	respCh chan *notification.MessageResponse
-	statCh chan *notification.MessageStatus
+	c *Config
+	r notification.Receiver
 }
+
+var _ notification.ReceiverSetter = &Voice{}
+var _ notification.Sender = &Voice{}
+var _ notification.StatusChecker = &Voice{}
+var _ notification.FriendlyValuer = &Voice{}
 
 type gather struct {
 	XMLName   xml.Name `xml:"Gather,omitempty"`
 	Action    string   `xml:"action,attr,omitempty"`
 	Method    string   `xml:"method,attr,omitempty"`
 	NumDigits int      `xml:"numDigits,attr,omitempty"`
+	Timeout   int      `xml:"timeout,attr,omitempty"`
 	Say       string   `xml:"Say,omitempty"`
 }
 
@@ -103,7 +107,8 @@ type twiMLEnd struct {
 var rmParen = regexp.MustCompile(`\s*\(.*?\)`)
 
 func voiceErrorMessage(ctx context.Context, err error) (string, error) {
-	if e, ok := errors.Cause(err).(alert.LogEntryFetcher); ok {
+	var e alert.LogEntryFetcher
+	if errors.As(err, &e) {
 		// we pass a 'sudo' context to give permission
 		var msg string
 		permission.SudoContext(ctx, func(sCtx context.Context) {
@@ -136,19 +141,13 @@ func voiceErrorMessage(ctx context.Context, err error) (string, error) {
 func NewVoice(ctx context.Context, db *sql.DB, c *Config) (*Voice, error) {
 	v := &Voice{
 		c: c,
-
-		respCh: make(chan *notification.MessageResponse),
-		statCh: make(chan *notification.MessageStatus, 10),
-	}
-
-	var err error
-	v.ban, err = newBanDB(ctx, db, c, "twilio_voice_errors")
-	if err != nil {
-		return nil, errors.Wrap(err, "init voice ban DB")
 	}
 
 	return v, nil
 }
+
+// SetReceiver sets the notification.Receiver for incoming calls and status updates.
+func (v *Voice) SetReceiver(r notification.Receiver) { v.r = r }
 
 func (v *Voice) ServeCall(w http.ResponseWriter, req *http.Request) {
 	if disabled(w, req) {
@@ -171,19 +170,13 @@ func (v *Voice) ServeCall(w http.ResponseWriter, req *http.Request) {
 }
 
 // Status provides the current status of a message.
-func (v *Voice) Status(ctx context.Context, id, providerID string) (*notification.MessageStatus, error) {
-	call, err := v.c.GetVoice(ctx, providerID)
+func (v *Voice) Status(ctx context.Context, externalID string) (*notification.Status, error) {
+	call, err := v.c.GetVoice(ctx, externalID)
 	if err != nil {
 		return nil, err
 	}
-	return call.messageStatus(id), nil
+	return call.messageStatus(), nil
 }
-
-// ListenStatus will return a channel that is fed async status updates.
-func (v *Voice) ListenStatus() <-chan *notification.MessageStatus { return v.statCh }
-
-// ListenResponse will return a channel that is fed async message responses.
-func (v *Voice) ListenResponse() <-chan *notification.MessageResponse { return v.respCh }
 
 // callbackURL returns an absolute URL pointing to the named callback.
 // If params is nil, default values from the BaseURL are used.
@@ -197,11 +190,11 @@ func (v *Voice) callbackURL(ctx context.Context, params url.Values, typ CallType
 func spellNumber(n int) string {
 	s := strconv.Itoa(n)
 
-	return strings.Join(strings.Split(s, ""), ", ")
+	return strings.Join(strings.Split(s, ""), ". ")
 }
 
 // Send implements the notification.Sender interface.
-func (v *Voice) Send(ctx context.Context, msg notification.Message) (*notification.MessageStatus, error) {
+func (v *Voice) Send(ctx context.Context, msg notification.Message) (*notification.SentMessage, error) {
 	cfg := config.FromContext(ctx)
 	if !cfg.Twilio.Enable {
 		return nil, errors.New("Twilio provider is disabled")
@@ -215,46 +208,46 @@ func (v *Voice) Send(ctx context.Context, msg notification.Message) (*notificati
 		"Number": toNumber,
 		"Type":   "TwilioVoice",
 	})
-	b, err := v.ban.IsBanned(ctx, toNumber, true)
-	if err != nil {
-		return nil, errors.Wrap(err, "check ban status")
-	}
-	if b {
-		return nil, errors.New("number had too many outgoing errors recently")
-	}
-
-	var ep CallType
-	var message string
-
-	switch msg.Type() {
-	case notification.MessageTypeAlert:
-		message = msg.Body()
-		ep = CallTypeAlert
-	case notification.MessageTypeAlertStatus:
-		message = rmParen.ReplaceAllString(msg.Body(), "")
-		ep = CallTypeAlertStatus
-	case notification.MessageTypeTest:
-		message = "This is a test message from GoAlert."
-		ep = CallTypeTest
-	case notification.MessageTypeVerification:
-		message = "Your verification code for GoAlert is: " + spellNumber(msg.SubjectID())
-		ep = CallTypeVerify
-	default:
-		return nil, errors.Errorf("unhandled message type %s", msg.Type().String())
-	}
-
-	if message == "" {
-		message = "No summary provided."
-	}
 
 	opts := &VoiceOptions{
 		ValidityPeriod: time.Second * 10,
-		CallType:       ep,
 		CallbackParams: make(url.Values),
 		Params:         make(url.Values),
 	}
+	var message string
+	subID := -1
+	switch t := msg.(type) {
+	case notification.AlertBundle:
+		message = fmt.Sprintf("%s Service '%s' has %d unacknowledged alerts.", cfg.ApplicationName(), t.ServiceName, t.Count)
+		opts.Params.Set(msgParamBundle, "1")
+		opts.CallType = CallTypeAlert
+	case notification.Alert:
+		if t.Summary == "" {
+			t.Summary = "No summary provided"
+		}
+		message = fmt.Sprintf("%s alert: %s.", cfg.ApplicationName(), t.Summary)
+		opts.CallType = CallTypeAlert
+		subID = t.AlertID
+	case notification.AlertStatus:
+		message = rmParen.ReplaceAllString(t.LogEntry, "")
+		message = fmt.Sprintf("%s update: %s", cfg.ApplicationName(), message)
+		opts.CallType = CallTypeAlertStatus
+		subID = t.AlertID
+	case notification.Test:
+		message = fmt.Sprintf("This is a test message from %s.", cfg.ApplicationName())
+		opts.CallType = CallTypeTest
+	case notification.Verification:
+		message = fmt.Sprintf(
+			"This is a message from %s to verify your voice contact method. Your verification code is: %s. Again, your verification code is: %s.",
+			cfg.ApplicationName(), spellNumber(t.Code), spellNumber(t.Code),
+		)
+		opts.CallType = CallTypeVerify
+	default:
+		return nil, errors.Errorf("unhandled message type: %T", t)
+	}
+
+	opts.Params.Set(msgParamSubID, strconv.Itoa(subID))
 	opts.CallbackParams.Set(msgParamID, msg.ID())
-	opts.Params.Set(msgParamSubID, strconv.Itoa(msg.SubjectID()))
 	// Encode the body so we don't need to worry about
 	// buggy apps not escaping url params properly.
 	opts.Params.Set(msgParamBody, b64enc.EncodeToString([]byte(message)))
@@ -265,7 +258,7 @@ func (v *Voice) Send(ctx context.Context, msg notification.Message) (*notificati
 		return nil, err
 	}
 
-	return voiceResponse.messageStatus(msg.ID()), nil
+	return voiceResponse.sentMessage(), nil
 }
 
 func disabled(w http.ResponseWriter, req *http.Request) bool {
@@ -315,17 +308,12 @@ func (v *Voice) ServeStatusCallback(w http.ResponseWriter, req *http.Request) {
 		callState.SequenceNumber = &seq
 	}
 
-	v.statCh <- callState.messageStatus(req.URL.Query().Get(msgParamID))
-
-	// Only update current call we are on, except for failed call
-	if status != CallStatusFailed {
-		return
-	}
-
-	err = v.ban.RecordError(context.Background(), number, true, "send failed")
+	err = v.r.SetMessageStatus(ctx, sid, callState.messageStatus())
 	if err != nil {
-		log.Log(ctx, errors.Wrap(err, "record error"))
+		// log and continue
+		log.Log(ctx, err)
 	}
+
 }
 
 type call struct {
@@ -342,19 +330,33 @@ type call struct {
 	msgBody      string
 }
 
-func (v *Voice) handleResponse(resp notification.MessageResponse) error {
+// doDeadline will ensure a return within 5 seconds, and log
+// the original error in the event of a timeout.
+func doDeadline(ctx context.Context, fn func() error) error {
 	errCh := make(chan error, 1)
-	resp.Err = errCh
-	v.respCh <- &resp
-	var err error
-	t := time.NewTicker(5 * time.Second)
+	timeoutCh := make(chan struct{})
+	go func() {
+		err := fn()
+		errCh <- err
+		select {
+		case errCh <- nil:
+			// error consumed, nothing to do
+		case <-timeoutCh:
+			// log if error (other than context canceled)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				log.Log(ctx, err)
+			}
+		}
+	}()
+	t := time.NewTimer(5 * time.Second)
 	defer t.Stop()
 	select {
-	case err = <-errCh:
+	case err := <-errCh:
+		return err
 	case <-t.C:
-		err = errVoiceTimeout
+		close(timeoutCh)
+		return errVoiceTimeout
 	}
-	return err
 }
 
 func (v *Voice) ServeStop(w http.ResponseWriter, req *http.Request) {
@@ -378,6 +380,7 @@ func (v *Voice) ServeStop(w http.ResponseWriter, req *http.Request) {
 			Action:    v.callbackURL(ctx, call.Q, CallTypeStop),
 			Method:    "POST",
 			NumDigits: 1,
+			Timeout:   10,
 			Say:       message,
 		}
 		renderXML(w, req, twiMLGather{
@@ -385,10 +388,8 @@ func (v *Voice) ServeStop(w http.ResponseWriter, req *http.Request) {
 		})
 
 	case digitConfirm:
-		err := v.handleResponse(notification.MessageResponse{
-			Ctx:    ctx,
-			From:   notification.Dest{Type: notification.DestTypeVoice, Value: call.Number},
-			Result: notification.ResultStop,
+		err := doDeadline(ctx, func() error {
+			return v.r.Stop(ctx, notification.Dest{Type: notification.DestTypeVoice, Value: call.Number})
 		})
 
 		if errResp(false, errors.Wrap(err, "process STOP response"), "") {
@@ -471,17 +472,11 @@ func (v *Voice) getCall(w http.ResponseWriter, req *http.Request) (context.Conte
 		if err == nil {
 			return false
 		}
-		if userErr {
-			rerr := v.ban.RecordError(context.Background(), phoneNumber, isOutbound, msg)
-			if rerr != nil {
-				log.Log(ctx, errors.Wrap(rerr, "record error"))
-			}
-		}
 
 		// always log the failure
 		log.Log(ctx, err)
 
-		if (errors.Cause(err) == errVoiceTimeout || retry.IsTemporaryError(err)) && retryCount < 3 {
+		if (errors.Is(err, errVoiceTimeout) || retry.IsTemporaryError(err)) && retryCount < 3 {
 			// schedule a retry
 			q.Set("retry_count", strconv.Itoa(retryCount+1))
 			q.Set("retry_digits", digits)
@@ -546,6 +541,7 @@ func (v *Voice) ServeTest(w http.ResponseWriter, req *http.Request) {
 			Action:    v.callbackURL(ctx, call.Q, CallTypeTest),
 			Method:    "POST",
 			NumDigits: 1,
+			Timeout:   10,
 			Say:       message,
 		}
 		renderXML(w, req, twiMLGather{
@@ -574,6 +570,7 @@ func (v *Voice) ServeVerify(w http.ResponseWriter, req *http.Request) {
 			Action:    v.callbackURL(ctx, call.Q, CallTypeVerify),
 			Method:    "POST",
 			NumDigits: 1,
+			Timeout:   10,
 			Say:       message,
 		}
 		renderXML(w, req, twiMLGather{
@@ -599,12 +596,13 @@ func (v *Voice) ServeAlertStatus(w http.ResponseWriter, req *http.Request) {
 		fallthrough
 	case "", digitRepeat:
 		message := fmt.Sprintf(
-			"%sStatus update for Alert number %d. %s. To repeat this message, press %s. To unenroll from all notifications, press %s. If you are done, you may simply hang up.",
+			"%sStatus update for Alert number %d. %s. To repeat this message, press %s. To unenroll from voice notifications to this number, press %s. If you are done, you may simply hang up.",
 			messagePrefix, call.msgSubjectID, call.msgBody, digitRepeat, digitStop)
 		g := &gather{
 			Action:    v.callbackURL(ctx, call.Q, CallTypeAlertStatus),
 			Method:    "POST",
 			NumDigits: 1,
+			Timeout:   10,
 			Say:       message,
 		}
 		renderXML(w, req, twiMLGather{
@@ -630,13 +628,7 @@ func (v *Voice) ServeAlert(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var err error
 	if !call.Outbound {
-		// v.serveVoiceUI(w, req)
-		err = v.ban.RecordError(context.Background(), call.Number, false, "incoming calls not supported")
-		if err != nil {
-			log.Log(ctx, errors.Wrap(err, "record error"))
-		}
 		renderXML(w, req, twiMLEnd{
 			Say: "Please login to the dashboard to manage alerts. Goodbye.",
 		})
@@ -658,14 +650,19 @@ func (v *Voice) ServeAlert(w http.ResponseWriter, req *http.Request) {
 		}
 		fallthrough
 	case "", digitRepeat:
+		var suffix string
+		if call.Q.Get(msgParamBundle) == "1" {
+			suffix = " all"
+		}
 		message := fmt.Sprintf(
-			"%sMessage from Go Alert. %s. To acknowledge, press %s. To close, press %s. To unenroll from all notifications, press %s. To repeat this message, press %s",
-			messagePrefix, call.msgBody, digitAck, digitClose, digitStop, digitRepeat)
+			"%sMessage from Go Alert. %s. To acknowledge%s, press %s. To close%s, press %s. To unenroll from all notifications, press %s. To repeat this message, press %s",
+			messagePrefix, call.msgBody, suffix, digitAck, suffix, digitClose, digitStop, digitRepeat)
 		// User wants Twilio to repeat the message
 		g := &gather{
 			Action:    v.callbackURL(ctx, call.Q, CallTypeAlert),
 			Method:    "POST",
 			NumDigits: 1,
+			Timeout:   10,
 			Say:       message,
 		}
 		renderXML(w, req, twiMLGather{
@@ -685,16 +682,18 @@ func (v *Voice) ServeAlert(w http.ResponseWriter, req *http.Request) {
 		var msg string
 		if call.Digits == digitClose {
 			result = notification.ResultResolve
-			msg = "Closed. Goodbye."
+			msg = "Closed"
 		} else {
 			result = notification.ResultAcknowledge
-			msg = "Acknowledged. Goodbye."
+			msg = "Acknowledged"
 		}
-		err := v.handleResponse(notification.MessageResponse{
-			Ctx:    ctx,
-			ID:     call.msgID,
-			From:   notification.Dest{Type: notification.DestTypeVoice, Value: call.Number},
-			Result: result,
+		if call.Q.Get(msgParamBundle) == "1" {
+			msg += " all alerts. Goodbye."
+		} else {
+			msg += ". Goodbye."
+		}
+		err := doDeadline(ctx, func() error {
+			return v.r.Receive(ctx, call.msgID, result)
 		})
 		if err != nil {
 			msg, err = voiceErrorMessage(ctx, err)
@@ -708,4 +707,13 @@ func (v *Voice) ServeAlert(w http.ResponseWriter, req *http.Request) {
 		})
 		return
 	}
+}
+
+// FriendlyValue will return the international formatting of the phone number.
+func (v *Voice) FriendlyValue(ctx context.Context, value string) (string, error) {
+	num, err := libphonenumber.Parse(value, "")
+	if err != nil {
+		return "", fmt.Errorf("parse number for formatting: %w", err)
+	}
+	return libphonenumber.Format(num, libphonenumber.INTERNATIONAL), nil
 }

@@ -19,14 +19,21 @@ type Config struct {
 	fallbackURL string
 
 	General struct {
-		PublicURL              string `info:"Publicly routable URL for UI links and API calls."`
-		GoogleAnalyticsID      string `public:"true"`
-		NotificationDisclaimer string `public:"true" info:"Disclaimer text for receiving pre-recorded notifications (appears on profile page)."`
-		DisableLabelCreation   bool   `public:"true" info:"Disables the ability to create new labels for services."`
+		ApplicationName              string `public:"true" info:"The name used in messaging and page titles. Defaults to \"GoAlert\"."`
+		PublicURL                    string `public:"true" info:"Publicly routable URL for UI links and API calls."`
+		GoogleAnalyticsID            string `public:"true"`
+		NotificationDisclaimer       string `public:"true" info:"Disclaimer text for receiving pre-recorded notifications (appears on profile page)."`
+		MessageBundles               bool   `public:"true" info:"Enables bundling status updates and alert notifications. Also allows 'ack/close all' responses to bundled alerts."`
+		ShortURL                     string `public:"true" info:"If set, messages will contain a shorter URL using this as a prefix (e.g. http://example.com). It should point to GoAlert and can be the same as the PublicURL."`
+		DisableSMSLinks              bool   `public:"true" info:"If set, SMS messages will not contain a URL pointing to GoAlert."`
+		DisableLabelCreation         bool   `public:"true" info:"Disables the ability to create new labels for services."`
+		DisableCalendarSubscriptions bool   `public:"true" info:"If set, disables all active calendar subscriptions as well as the ability to create new calendar subscriptions."`
+		EnableV1GraphQL              bool   `info:"Enables the deprecated /v1/graphql endpoint (replaced by /api/graphql)."`
 	}
 
 	Maintenance struct {
 		AlertCleanupDays int `public:"true" info:"Closed alerts will be deleted after this many days (0 means disable cleanup)."`
+		APIKeyExpireDays int `public:"true" info:"Unused calendar API keys will be disabled after this many days (0 means disable cleanup)."`
 	}
 
 	Auth struct {
@@ -57,6 +64,11 @@ type Config struct {
 		IssuerURL    string
 		ClientID     string
 		ClientSecret string `password:"true"`
+
+		Scopes                    string `info:"Requested scopes for authentication. If left blank, openid, profile, and email will be used."`
+		UserInfoEmailPath         string `info:"JMESPath expression to find email address in UserInfo. If set, the email claim will be ignored in favor of this. (suggestion: email)."`
+		UserInfoEmailVerifiedPath string `info:"JMESPath expression to find email verification state in UserInfo. If set, the email_verified claim will be ignored in favor of this. (suggestion: email_verified)."`
+		UserInfoNamePath          string `info:"JMESPath expression to find full name in UserInfo. If set, the name claim will be ignored in favor of this. (suggestion: name || cn || join(' ', [firstname, lastname]))"`
 	}
 
 	Mailgun struct {
@@ -83,6 +95,28 @@ type Config struct {
 		AccountSID string
 		AuthToken  string `password:"true" info:"The primary Auth Token for Twilio. Must be primary (not secondary) for request valiation."`
 		FromNumber string `public:"true" info:"The Twilio number to use for outgoing notifications."`
+
+		DisableTwoWaySMS      bool     `info:"Disables SMS reply codes for alert messages."`
+		SMSCarrierLookup      bool     `info:"Perform carrier lookup of SMS contact methods (required for SMSFromNumberOverride). Extra charges may apply."`
+		SMSFromNumberOverride []string `info:"List of 'carrier=number' pairs, SMS messages to numbers of the provided carrier string (exact match) will use the alternate From Number."`
+	}
+
+	SMTP struct {
+		Enable bool `public:"true" info:"Enables email as a contact method."`
+
+		From string `public:"true" info:"The email address messages should be sent from."`
+
+		Address    string `info:"The server address to use for sending email. Port is optional."`
+		DisableTLS bool   `info:"Disables TLS on the connection (STARTTLS will still be used if supported)."`
+		SkipVerify bool   `info:"Disables certificate validation for TLS/STARTTLS (insecure)."`
+
+		Username string `info:"Username for authentication."`
+		Password string `password:"true" info:"Password for authentication."`
+	}
+
+	Webhook struct {
+		Enable      bool     `public:"true" info:"Enables webhook as a contact method."`
+		AllowedURLs []string `public:"true" info:"If set, allows webhooks for these domains only."`
 	}
 
 	Feedback struct {
@@ -91,11 +125,27 @@ type Config struct {
 	}
 }
 
-// CallbackURL will return a public-routable URL to the given path.
-// It will use PublicURL() to fill in missing pieces.
-//
-// It will panic if provided an invalid URL.
-func (cfg Config) CallbackURL(path string, mergeParams ...url.Values) string {
+// TwilioSMSFromNumber will determine the appropriate FROM number to use for SMS messages to the given number
+func (cfg Config) TwilioSMSFromNumber(carrier string) string {
+	if carrier == "" {
+		return cfg.Twilio.FromNumber
+	}
+
+	for _, s := range cfg.Twilio.SMSFromNumberOverride {
+		parts := strings.SplitN(s, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if parts[0] != carrier {
+			continue
+		}
+		return parts[1]
+	}
+
+	return cfg.Twilio.FromNumber
+}
+
+func (cfg Config) rawCallbackURL(path string, mergeParams ...url.Values) *url.URL {
 	base, err := url.Parse(cfg.PublicURL())
 	if err != nil {
 		panic(errors.Wrap(err, "parse PublicURL"))
@@ -123,7 +173,104 @@ func (cfg Config) CallbackURL(path string, mergeParams ...url.Values) string {
 	}
 
 	base.RawQuery = params.Encode()
+	return base
+}
+
+// CallbackURL will return a public-routable URL to the given path.
+// It will use PublicURL() to fill in missing pieces.
+//
+// It will panic if provided an invalid URL.
+func (cfg Config) CallbackURL(path string, mergeParams ...url.Values) string {
+	base := cfg.rawCallbackURL(path, mergeParams...)
+
+	newPath := ShortPath(base.Path)
+	if newPath != "" && cfg.General.ShortURL != "" {
+		short, err := url.Parse(cfg.General.ShortURL)
+		if err != nil {
+			panic(errors.Wrap(err, "parse ShortURL"))
+		}
+		base.Path = newPath
+		base.Host = short.Host
+		base.Scheme = short.Scheme
+	}
+
 	return base.String()
+}
+
+//  MatchURL will compare two url strings and will return true if they match.
+func MatchURL(baseURL, testURL string) (bool, error) {
+	compareQueryValues := func(baseVal, testVal url.Values) bool {
+		for name := range baseVal {
+			if baseVal.Get(name) == testVal.Get(name) {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+
+	addImplicitPort := func(u *url.URL) {
+		if strings.Contains(u.Host, ":") {
+			return
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			u.Host += ":80"
+		case "https":
+			u.Host += ":443"
+		}
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return false, err
+	}
+
+	test, err := url.Parse(testURL)
+	if err != nil {
+		return false, err
+	}
+
+	addImplicitPort(base)
+	addImplicitPort(test)
+
+	// host/port check
+	if !strings.EqualFold(base.Host, test.Host) {
+		return false, nil
+	}
+
+	// scheme check
+	if !strings.EqualFold(base.Scheme, test.Scheme) {
+		return false, nil
+	}
+
+	// path check
+	if len(base.Path) > 1 && !strings.HasPrefix(test.Path, base.Path) {
+		return false, nil
+	}
+
+	// query check
+	if !compareQueryValues(base.Query(), test.Query()) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// ValidWebhookURL returns true if the URL is an allowed webhook source.
+func (cfg Config) ValidWebhookURL(testURL string) bool {
+	if len(cfg.Webhook.AllowedURLs) == 0 {
+		return true
+	}
+	for _, baseU := range cfg.Webhook.AllowedURLs {
+		matched, err := MatchURL(baseU, testURL)
+		if err != nil {
+			return false
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidReferer returns true if the URL is an allowed referer source.
@@ -141,16 +288,32 @@ func (cfg Config) ValidReferer(reqURL, ref string) bool {
 		// just ensure ref is same host/scheme as req
 		u.Path = ""
 		u.RawQuery = ""
-		return strings.HasPrefix(ref, u.String())
+		matched, err := MatchURL(u.String(), ref)
+		if err != nil {
+			return false
+		}
+		return matched
 	}
 
 	for _, u := range cfg.Auth.RefererURLs {
-		if strings.HasPrefix(ref, u) {
+		matched, err := MatchURL(u, ref)
+		if err != nil {
+			return false
+		}
+		if matched {
 			return true
 		}
 	}
 
 	return false
+}
+
+// ApplicationName will return the General.ApplicationName
+func (cfg Config) ApplicationName() string {
+	if cfg.General.ApplicationName == "" {
+		return "GoAlert"
+	}
+	return cfg.General.ApplicationName
 }
 
 // PublicURL will return the General.PublicURL or a fallback address (i.e. the app listening port).
@@ -192,7 +355,23 @@ func (cfg Config) Validate() error {
 		)
 	}
 
+	if cfg.General.ApplicationName != "" {
+		err = validate.Many(err, validate.ASCII("General.ApplicationName", cfg.General.ApplicationName, 0, 32))
+	}
+
 	validateKey := func(fname, val string) error { return validate.ASCII(fname, val, 0, 128) }
+	validatePath := func(fname, val string) error {
+		if val == "" {
+			return nil
+		}
+		return validate.JMESPath(fname, val)
+	}
+	validateScopes := func(fname, val string) error {
+		if val == "" {
+			return nil
+		}
+		return validate.OAuthScope(fname, val, "openid")
+	}
 
 	err = validate.Many(
 		err,
@@ -206,10 +385,18 @@ func (cfg Config) Validate() error {
 		validateKey("GitHub.ClientSecret", cfg.GitHub.ClientSecret),
 		validateKey("Slack.AccessToken", cfg.Slack.AccessToken),
 		validate.Range("Maintenance.AlertCleanupDays", cfg.Maintenance.AlertCleanupDays, 0, 9000),
+		validate.Range("Maintenance.APIKeyExpireDays", cfg.Maintenance.APIKeyExpireDays, 0, 9000),
+		validateScopes("OIDC.Scopes", cfg.OIDC.Scopes),
+		validatePath("OIDC.UserInfoEmailPath", cfg.OIDC.UserInfoEmailPath),
+		validatePath("OIDC.UserInfoEmailVerifiedPath", cfg.OIDC.UserInfoEmailVerifiedPath),
+		validatePath("OIDC.UserInfoNamePath", cfg.OIDC.UserInfoNamePath),
 	)
 
 	if cfg.OIDC.IssuerURL != "" {
 		err = validate.Many(err, validate.AbsoluteURL("OIDC.IssuerURL", cfg.OIDC.IssuerURL))
+	}
+	if cfg.OIDC.Scopes != "" {
+		err = validate.Many(err, validateScopes("OIDC.Scopes", cfg.OIDC.Scopes))
 	}
 	if cfg.GitHub.EnterpriseURL != "" {
 		err = validate.Many(err, validate.AbsoluteURL("GitHub.EnterpriseURL", cfg.GitHub.EnterpriseURL))
@@ -219,6 +406,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Mailgun.EmailDomain != "" {
 		err = validate.Many(err, validate.Email("Mailgun.EmailDomain", "example@"+cfg.Mailgun.EmailDomain))
+	}
+	if cfg.SMTP.From != "" {
+		err = validate.Many(err, validate.Email("SMTP.From", cfg.SMTP.From))
 	}
 
 	err = validate.Many(
@@ -250,6 +440,10 @@ func (cfg Config) Validate() error {
 			"ClientID", cfg.OIDC.ClientID,
 			"ClientSecret", cfg.OIDC.ClientSecret,
 		),
+		validateEnable("SMTP", cfg.SMTP.Enable,
+			"From", cfg.SMTP.From,
+			"Address", cfg.SMTP.Address,
+		),
 	)
 
 	if cfg.Feedback.OverrideURL != "" {
@@ -259,12 +453,45 @@ func (cfg Config) Validate() error {
 		)
 	}
 
+	if cfg.General.ShortURL != "" {
+		err = validate.Many(
+			err,
+			validate.AbsoluteURL("General.ShortURL", cfg.General.ShortURL),
+		)
+	}
+
 	for i, urlStr := range cfg.Auth.RefererURLs {
 		field := fmt.Sprintf("Auth.RefererURLs[%d]", i)
 		err = validate.Many(
 			err,
 			validate.AbsoluteURL(field, urlStr),
 		)
+	}
+
+	for i, urlStr := range cfg.Webhook.AllowedURLs {
+		field := fmt.Sprintf("Webhook.AllowedURLs[%d]", i)
+		err = validate.Many(err, validate.AbsoluteURL(field, urlStr))
+	}
+
+	m := make(map[string]bool)
+	for i, str := range cfg.Twilio.SMSFromNumberOverride {
+		parts := strings.SplitN(str, "=", 2)
+		fname := fmt.Sprintf("Twilio.SMSFromNumberOverride[%d]", i)
+		if len(parts) != 2 {
+			err = validate.Many(err, validation.NewFieldError(
+				fname,
+				"must be in the format 'carrier=number'",
+			))
+			continue
+		}
+		err = validate.Many(err,
+			validate.ASCII(fname+".Carrier", parts[0], 1, 255),
+			validate.Phone(fname+".Phone", parts[1]),
+		)
+		if m[parts[0]] {
+			err = validate.Many(err, validation.NewFieldError(fname, fmt.Sprintf("carrier override '%s' already set", parts[0])))
+		}
+		m[parts[0]] = true
 	}
 
 	return err

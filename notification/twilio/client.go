@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,9 +13,10 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/target/goalert/config"
+	"github.com/target/goalert/util/log"
 )
 
-// DefaultTwilioAPIURL is the value that will be used if Config.APIURL is empty.
+// DefaultTwilioAPIURL is the value that will be used for API calls if Config.BaseURL is empty.
 const DefaultTwilioAPIURL = "https://api.twilio.com/2010-04-01"
 
 // SMSOptions allows configuring outgoing SMS messages.
@@ -25,6 +26,9 @@ type SMSOptions struct {
 
 	// CallbackParams will be added to callback URLs
 	CallbackParams url.Values
+
+	// FromNumber allows overriding the specified FromNumber instead of using the context config.
+	FromNumber string
 }
 
 // VoiceOptions allows configuring outgoing voice calls.
@@ -68,7 +72,7 @@ func urlJoin(base string, parts ...string) string {
 	return base + "/" + strings.Join(parts, "/")
 }
 func (c *Config) url(parts ...string) string {
-	base := c.APIURL
+	base := c.BaseURL
 	if base == "" {
 		base = DefaultTwilioAPIURL
 	}
@@ -117,7 +121,7 @@ func (c *Config) GetSMS(ctx context.Context, sid string) (*Message, error) {
 	}
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +154,7 @@ func (c *Config) GetVoice(ctx context.Context, sid string) (*Call, error) {
 	}
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +234,7 @@ func (c *Config) StartVoice(ctx context.Context, to string, o *VoiceOptions) (*C
 	}
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -260,10 +264,25 @@ func (c *Config) StartVoice(ctx context.Context, to string, o *VoiceOptions) (*C
 
 // SendSMS will send an SMS using Twilio.
 func (c *Config) SendSMS(ctx context.Context, to, body string, o *SMSOptions) (*Message, error) {
+	if o == nil {
+		o = &SMSOptions{}
+	}
 	cfg := config.FromContext(ctx)
 	v := make(url.Values)
 	v.Set("To", to)
-	v.Set("From", cfg.Twilio.FromNumber)
+	if o.FromNumber != "" {
+		v.Set("From", o.FromNumber)
+	} else {
+		info, err := c.CarrierInfo(ctx, to, cfg.Twilio.SMSCarrierLookup)
+		if err != nil && cfg.Twilio.SMSCarrierLookup {
+			log.Log(ctx, err)
+		}
+		if info != nil {
+			v.Set("From", cfg.TwilioSMSFromNumber(info.Name))
+		} else {
+			v.Set("From", cfg.TwilioSMSFromNumber(""))
+		}
+	}
 	v.Set("Body", body)
 
 	stat, err := o.StatusCallbackURL(cfg)
@@ -280,7 +299,7 @@ func (c *Config) SendSMS(ctx context.Context, to, body string, o *SMSOptions) (*
 	}
 	defer resp.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}

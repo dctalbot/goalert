@@ -2,11 +2,11 @@ package smoketest
 
 import (
 	"bytes"
-	"github.com/target/goalert/smoketest/harness"
 	"net/http"
 	"net/url"
 	"testing"
-	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestStatusUpdates checks basic functionality of status updates:
@@ -73,23 +73,19 @@ func TestStatusUpdates(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 
 	d1.ExpectSMS("first alert")
 	d1.ExpectSMS("second alert")
-	tw.WaitAndAssert()
 
 	doClose("first alert")
-
-	h.Delay(15 * time.Second) // ensure no additional notifications sent
-	tw.WaitAndAssert()
+	d1.ExpectSMS("closed")
 
 	doClose("second alert")
-
-	// expect (1) status notification
 	d1.ExpectSMS("closed")
-	h.Delay(15 * time.Second) // ensure no additional notifications sent
 
-	tw.WaitAndAssert()
+	// Ensure status updates are not sent to the user that caused them.
+	h.CreateAlert(h.UUID("sid"), "third alert")
+	d1.ExpectSMS("third alert").ThenReply("c").ThenExpect("closed")
 }

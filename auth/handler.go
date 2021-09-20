@@ -1,28 +1,28 @@
 package auth
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
+	"github.com/target/goalert/auth/authtoken"
 	"github.com/target/goalert/config"
 	"github.com/target/goalert/integrationkey"
-	"github.com/target/goalert/keyring"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/user"
 	"github.com/target/goalert/util"
 	"github.com/target/goalert/util/errutil"
 	"github.com/target/goalert/util/log"
+	"github.com/target/goalert/util/sqlutil"
 	"github.com/target/goalert/validation"
 	"github.com/target/goalert/validation/validate"
 	"go.opencensus.io/trace"
@@ -42,13 +42,6 @@ type registeredProvider struct {
 	ProviderInfo
 }
 
-// HandlerConfig provides configuration for the auth handler.
-type HandlerConfig struct {
-	UserStore      user.Store
-	SessionKeyring keyring.Keyring
-	IntKeyStore    integrationkey.Store
-}
-
 // Handler will serve authentication requests for registered identity providers.
 type Handler struct {
 	providers map[string]IdentityProvider
@@ -58,10 +51,15 @@ type Handler struct {
 	userLookup *sql.Stmt
 	addSubject *sql.Stmt
 	updateUA   *sql.Stmt
+	updateUser *sql.Stmt
 
 	startSession *sql.Stmt
 	fetchSession *sql.Stmt
 	endSession   *sql.Stmt
+
+	userSessions       *sql.Stmt
+	endSessionUser     *sql.Stmt
+	endAllSessionsUser *sql.Stmt
 }
 
 // NewHandler creates a new Handler using the provided config.
@@ -76,6 +74,14 @@ func NewHandler(ctx context.Context, db *sql.DB, cfg HandlerConfig) (*Handler, e
 		db:        db,
 
 		cfg: cfg,
+
+		updateUser: p.P(`
+			update users
+			set
+				name = case when $2 = '' then name else $2 end,
+				email = case when $3 = '' then email else $3 end
+			where id = $1
+		`),
 
 		userLookup: p.P(`
 			select user_id
@@ -94,7 +100,7 @@ func NewHandler(ctx context.Context, db *sql.DB, cfg HandlerConfig) (*Handler, e
 		`),
 		endSession: p.P(`
 			delete from auth_user_sessions
-			where id = $1
+			where id = any($1)
 		`),
 
 		updateUA: p.P(`
@@ -104,14 +110,103 @@ func NewHandler(ctx context.Context, db *sql.DB, cfg HandlerConfig) (*Handler, e
 		`),
 
 		fetchSession: p.P(`
+			with update as (
+				update auth_user_sessions
+				set last_access_at = now()
+				where id = $1 AND (last_access_at isnull OR last_access_at < now() - '1 minute'::interval)
+			)
 			select sess.user_id, u.role
 			from auth_user_sessions sess
 			join users u on u.id = sess.user_id
 			where sess.id = $1
 		`),
+
+		userSessions: p.P(`
+			select id, user_agent, created_at, last_access_at
+			from auth_user_sessions
+			where user_id = $1
+		`),
+
+		endSessionUser: p.P(`
+			delete from auth_user_sessions
+			where user_id = $1 and id = $2
+		`),
+
+		endAllSessionsUser: p.P(`
+			delete from auth_user_sessions
+			where user_id = $1 and id != $2
+		`),
 	}
 
 	return h, p.Err
+}
+
+// UserSession represents an active user session.
+type UserSession struct {
+	ID           string
+	UserAgent    string
+	CreatedAt    time.Time
+	LastAccessAt time.Time
+	UserID       string
+}
+
+func (h *Handler) EndUserSessionTx(ctx context.Context, tx *sql.Tx, id ...string) error {
+	err := permission.LimitCheckAny(ctx, permission.User)
+	if err != nil {
+		return err
+	}
+	if permission.Admin(ctx) {
+		_, err = tx.StmtContext(ctx, h.endSession).ExecContext(ctx, sqlutil.UUIDArray(id))
+	} else {
+		_, err = tx.StmtContext(ctx, h.endSessionUser).ExecContext(ctx, permission.UserID(ctx), sqlutil.UUIDArray(id))
+	}
+	return err
+}
+
+// EndAllUserSessionsTx ends all sessions other than the user's currently active session
+func (h *Handler) EndAllUserSessionsTx(ctx context.Context, tx *sql.Tx) error {
+	err := permission.LimitCheckAny(ctx, permission.Admin, permission.MatchUser(permission.UserID(ctx)))
+	if err != nil {
+		return err
+	}
+
+	// get current session id
+	src := permission.Source(ctx)
+
+	stmt := h.endAllSessionsUser
+	if tx != nil {
+		stmt = tx.StmtContext(ctx, stmt)
+	}
+	_, err = stmt.ExecContext(ctx, permission.UserID(ctx), src.ID)
+
+	return err
+}
+
+func (h *Handler) FindAllUserSessions(ctx context.Context, userID string) ([]UserSession, error) {
+	err := permission.LimitCheckAny(ctx, permission.Admin, permission.MatchUser(userID))
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := h.userSessions.QueryContext(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []UserSession
+	for rows.Next() {
+		s := UserSession{UserID: userID}
+		var lastAccess sql.NullTime
+		err = rows.Scan(&s.ID, &s.UserAgent, &s.CreatedAt, &lastAccess)
+		if err != nil {
+			return nil, err
+		}
+		s.LastAccessAt = lastAccess.Time.Truncate(time.Minute)
+		s.CreatedAt = s.CreatedAt.Truncate(time.Minute)
+		sessions = append(sessions, s)
+	}
+
+	return sessions, nil
 }
 
 // ServeLogout will clear the current session cookie and end the session (if any).
@@ -120,7 +215,7 @@ func (h *Handler) ServeLogout(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	src := permission.Source(ctx)
 	if src != nil && src.Type == permission.SourceTypeAuthProvider {
-		_, err := h.endSession.ExecContext(context.Background(), src.ID)
+		_, err := h.endSession.ExecContext(context.Background(), sqlutil.UUIDArray([]string{src.ID}))
 		if err != nil {
 			log.Log(ctx, errors.Wrap(err, "end session"))
 		}
@@ -133,6 +228,16 @@ func (h *Handler) ServeProviders(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 	info := make([]registeredProvider, 0, len(h.providers))
 
+	u, err := url.Parse(req.RequestURI)
+	if errutil.HTTPError(ctx, w, err) {
+		return
+	}
+	// Detect current pathPrefix instead of using CallbackURL since it
+	// will be used for browser linking.
+	//
+	// Also handles edge cases around first-time setup/localhost/etc...
+	pathPrefix := strings.TrimSuffix(u.Path, req.URL.Path)
+
 	for id, p := range h.providers {
 		if !p.Info(ctx).Enabled {
 			continue
@@ -140,7 +245,7 @@ func (h *Handler) ServeProviders(w http.ResponseWriter, req *http.Request) {
 
 		info = append(info, registeredProvider{
 			ID:           id,
-			URL:          "/api/v2/identity/providers/" + url.PathEscape(id),
+			URL:          path.Join(pathPrefix, "/api/v2/identity/providers", url.PathEscape(id)),
 			ProviderInfo: p.Info(ctx),
 		})
 	}
@@ -155,7 +260,7 @@ func (h *Handler) ServeProviders(w http.ResponseWriter, req *http.Request) {
 
 // IdentityProviderHandler will return a handler for the given provider ID.
 //
-// It panics if the id has not been registerd with AddIdentityProvider.
+// It panics if the id has not been registered with AddIdentityProvider.
 func (h *Handler) IdentityProviderHandler(id string) http.HandlerFunc {
 	p, ok := h.providers[id]
 	if !ok {
@@ -260,7 +365,8 @@ func (h *Handler) handleProvider(id string, p IdentityProvider, refU *url.URL, w
 	route.CurrentURL = u.String()
 
 	sub, err := p.ExtractIdentity(&route, w, req)
-	if r, ok := err.(Redirector); ok {
+	var r Redirector
+	if errors.As(err, &r) {
 		sp.Annotate([]trace.Attribute{trace.StringAttribute("auth.redirectURL", r.RedirectURL())}, "Redirected.")
 		http.Redirect(w, req, r.RedirectURL(), http.StatusFound)
 		return
@@ -296,7 +402,7 @@ func (h *Handler) handleProvider(id string, p IdentityProvider, refU *url.URL, w
 
 	var userID string
 	err = h.userLookup.QueryRowContext(ctx, id, sub.SubjectID).Scan(&userID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
 	if err != nil {
@@ -350,9 +456,20 @@ func (h *Handler) handleProvider(id string, p IdentityProvider, refU *url.URL, w
 			trace.StringAttribute("user.email", u.Email),
 			trace.StringAttribute("user.id", u.ID),
 		}, "Created new user.")
+	} else {
+		_, err = h.updateUser.ExecContext(ctx, userID, validate.SanitizeName(sub.Name),
+			validate.SanitizeEmail(sub.Email))
+		if err != nil {
+			log.Log(ctx, errors.Wrap(err, "update user info"))
+		}
 	}
 
-	sessToken, sessID, err := h.CreateSession(ctx, req.UserAgent(), userID)
+	tok, err := h.CreateSession(ctx, req.UserAgent(), userID)
+	if err != nil {
+		errRedirect(err)
+		return
+	}
+	tokStr, err := tok.Encode(h.cfg.SessionKeyring.Sign)
 	if err != nil {
 		errRedirect(err)
 		return
@@ -361,15 +478,15 @@ func (h *Handler) handleProvider(id string, p IdentityProvider, refU *url.URL, w
 	sp.Annotate([]trace.Attribute{
 		trace.BoolAttribute("auth.login", true),
 		trace.StringAttribute("auth.userID", userID),
-		trace.StringAttribute("auth.sessionID", sessID),
+		trace.StringAttribute("auth.sessionID", tok.ID.String()),
 	}, "User authenticated.")
 
 	if noRedirect {
-		io.WriteString(w, sessToken)
+		io.WriteString(w, tokStr)
 		return
 	}
 
-	h.setSessionCookie(w, req, sessToken)
+	h.setSessionCookie(w, req, tokStr)
 
 	if newUser {
 		q := refU.Query()
@@ -381,23 +498,18 @@ func (h *Handler) handleProvider(id string, p IdentityProvider, refU *url.URL, w
 }
 
 // CreateSession will start a new session for the given UserID, returning a newly signed token.
-func (h *Handler) CreateSession(ctx context.Context, userAgent, userID string) (token, id string, err error) {
-	sessID := uuid.NewV4()
-	_, err = h.startSession.ExecContext(ctx, sessID.String(), userAgent, userID)
+func (h *Handler) CreateSession(ctx context.Context, userAgent, userID string) (*authtoken.Token, error) {
+	tok := &authtoken.Token{
+		Version: 1,
+		Type:    authtoken.TypeSession,
+		ID:      uuid.New(),
+	}
+	_, err := h.startSession.ExecContext(ctx, tok.ID.String(), userAgent, userID)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
-	var buf bytes.Buffer
-	buf.WriteByte('S') // session IDs will be prefixed with an "S"
-	buf.Write(sessID.Bytes())
-	sig, err := h.cfg.SessionKeyring.Sign(buf.Bytes())
-	if err != nil {
-		return "", "", err
-	}
-	buf.Write(sig)
-
-	return base64.URLEncoding.EncodeToString(buf.Bytes()), sessID.String(), nil
+	return tok, nil
 }
 
 func (h *Handler) setSessionCookie(w http.ResponseWriter, req *http.Request, val string) {
@@ -411,25 +523,40 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, req *http.Request, val
 
 func (h *Handler) authWithToken(w http.ResponseWriter, req *http.Request, next http.Handler) bool {
 	err := req.ParseMultipartForm(32 << 20) // 32<<20 (32MiB) value is the `defaultMaxMemory` used in the net/http package when `req.FormValue` is called
-	if err != nil && err != http.ErrNotMultipart {
+	if err != nil && !errors.Is(err, http.ErrNotMultipart) {
 		http.Error(w, err.Error(), 400)
 		return true
 	}
 
-	tok := GetToken(req)
-	if tok == "" {
+	tokStr := GetToken(req)
+	if tokStr == "" {
 		return false
+	}
+
+	tok, _, err := authtoken.Parse(tokStr, func(t authtoken.Type, p, sig []byte) (bool, bool) {
+		if t == authtoken.TypeSession {
+			return h.cfg.SessionKeyring.Verify(p, sig)
+		}
+
+		return h.cfg.APIKeyring.Verify(p, sig)
+	})
+	if errutil.HTTPError(req.Context(), w, err) {
+		return true
 	}
 
 	// TODO: update once scopes are implemented
 	ctx := req.Context()
 	switch req.URL.Path {
 	case "/v1/api/alerts", "/api/v2/generic/incoming":
-		ctx, err = h.cfg.IntKeyStore.Authorize(ctx, tok, integrationkey.TypeGeneric)
+		ctx, err = h.cfg.IntKeyStore.Authorize(ctx, *tok, integrationkey.TypeGeneric)
 	case "/v1/webhooks/grafana", "/api/v2/grafana/incoming":
-		ctx, err = h.cfg.IntKeyStore.Authorize(ctx, tok, integrationkey.TypeGrafana)
+		ctx, err = h.cfg.IntKeyStore.Authorize(ctx, *tok, integrationkey.TypeGrafana)
 	case "/api/v2/site24x7/incoming":
-		ctx, err = h.cfg.IntKeyStore.Authorize(ctx, tok, integrationkey.TypeSite24x7)
+		ctx, err = h.cfg.IntKeyStore.Authorize(ctx, *tok, integrationkey.TypeSite24x7)
+	case "/api/v2/prometheusalertmanager/incoming":
+		ctx, err = h.cfg.IntKeyStore.Authorize(ctx, *tok, integrationkey.TypePrometheusAlertmanager)
+	case "/api/v2/calendar":
+		ctx, err = h.cfg.CalSubStore.Authorize(ctx, *tok)
 	default:
 		return false
 	}
@@ -461,45 +588,32 @@ func (h *Handler) WrapHandler(wrapped http.Handler) http.Handler {
 
 		// User session flow
 		ctx := req.Context()
-		tok := GetToken(req)
+		tokStr := GetToken(req)
 		var fromCookie bool
-		if tok == "" {
+		if tokStr == "" {
 			c, err := req.Cookie(CookieName)
 			if err == nil {
 				fromCookie = true
-				tok = c.Value
+				tokStr = c.Value
 			}
 		}
-		if tok == "" {
+		if tokStr == "" {
 			c, err := req.Cookie(v1CookieName)
 			if err == nil {
 				fromCookie = true
-				tok = c.Value
+				tokStr = c.Value
 			}
 		}
 
-		if tok == "" {
+		if tokStr == "" {
 			// no cookie value
 			wrapped.ServeHTTP(w, req)
 			return
 		}
-		data, err := base64.URLEncoding.DecodeString(tok)
-		if err != nil {
-			if fromCookie {
-				h.setSessionCookie(w, req, "")
-			}
-			wrapped.ServeHTTP(w, req)
-			return
-		}
-		if len(data) == 0 || data[0] != 'S' || len(data) < 17 {
-			if fromCookie {
-				h.setSessionCookie(w, req, "")
-			}
-			wrapped.ServeHTTP(w, req)
-			return
-		}
-
-		id, err := uuid.FromBytes(data[1:17])
+		tok, isOld, err := authtoken.Parse(tokStr, func(t authtoken.Type, p, sig []byte) (bool, bool) {
+			// only session tokens are supported for cookies
+			return h.cfg.SessionKeyring.Verify(p, sig)
+		})
 		if err != nil {
 			if fromCookie {
 				h.setSessionCookie(w, req, "")
@@ -508,37 +622,24 @@ func (h *Handler) WrapHandler(wrapped http.Handler) http.Handler {
 			return
 		}
 
-		valid, isOld := h.cfg.SessionKeyring.Verify(data[:17], data[17:])
-		if !valid {
-			if fromCookie {
-				h.setSessionCookie(w, req, "")
-			}
-			wrapped.ServeHTTP(w, req)
-			return
-		}
 		if fromCookie && isOld {
 			// send new signature back if it was signed with an old key
-			sig, err := h.cfg.SessionKeyring.Sign(data[:17])
+			newSignedToken, err := tok.Encode(h.cfg.SessionKeyring.Sign)
 			if err != nil {
 				log.Log(ctx, errors.Wrap(err, "failed to sign/issue new session token"))
 			} else {
-				data = append(data[:17], sig...)
-				h.setSessionCookie(w, req, base64.URLEncoding.EncodeToString(data))
-
-				_, err = h.updateUA.ExecContext(ctx, id.String(), req.UserAgent())
+				h.setSessionCookie(w, req, newSignedToken)
+				_, err = h.updateUA.ExecContext(ctx, tok.ID.String(), req.UserAgent())
 				if err != nil {
 					log.Log(ctx, errors.Wrap(err, "update user agent (session key refresh)"))
 				}
 			}
-		} else if fromCookie {
-			// compat, always set cookie (for transition from /v1 to /api)
-			h.setSessionCookie(w, req, tok)
 		}
 
 		var userID string
 		var userRole permission.Role
-		err = h.fetchSession.QueryRowContext(ctx, id.String()).Scan(&userID, &userRole)
-		if err == sql.ErrNoRows {
+		err = h.fetchSession.QueryRowContext(ctx, tok.ID.String()).Scan(&userID, &userRole)
+		if errors.Is(err, sql.ErrNoRows) {
 			if fromCookie {
 				h.setSessionCookie(w, req, "")
 			}
@@ -556,7 +657,7 @@ func (h *Handler) WrapHandler(wrapped http.Handler) http.Handler {
 			userRole,
 			&permission.SourceInfo{
 				Type: permission.SourceTypeAuthProvider,
-				ID:   id.String(),
+				ID:   tok.ID.String(),
 			},
 		)
 		req = req.WithContext(ctx)

@@ -12,6 +12,7 @@ import (
 	"github.com/target/goalert/heartbeat"
 	"github.com/target/goalert/integrationkey"
 	"github.com/target/goalert/label"
+	"github.com/target/goalert/notification"
 	"github.com/target/goalert/override"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/schedule"
@@ -21,6 +22,7 @@ import (
 	"github.com/target/goalert/user"
 	"github.com/target/goalert/user/contactmethod"
 	"github.com/target/goalert/user/notificationrule"
+	"github.com/target/goalert/util/timeutil"
 )
 
 var timeZones = []string{"America/Chicago", "Europe/Berlin", "UTC"}
@@ -121,7 +123,7 @@ func (d *datagen) NewCM(userID string) {
 		cm.Type = contactmethod.TypeVoice
 	}
 
-	cm.Value = d.ids.Gen(d.genPhone, cm.Type.DestType().String())
+	cm.Value = d.ids.Gen(d.genPhone, notification.ScannableDestType{CM: cm.Type}.DestType().String())
 	d.ContactMethods = append(d.ContactMethods, cm)
 }
 
@@ -172,7 +174,7 @@ func (d *datagen) NewSchedule() {
 
 // NewScheduleRule will generate a random schedule rule for the provided schedule ID.
 func (d *datagen) NewScheduleRule(scheduleID string) {
-	var filter rule.WeekdayFilter
+	var filter timeutil.WeekdayFilter
 	for i := range filter {
 		filter.SetDay(time.Weekday(i), gofakeit.Bool())
 	}
@@ -186,8 +188,8 @@ func (d *datagen) NewScheduleRule(scheduleID string) {
 		ID:            gofakeit.UUID(),
 		ScheduleID:    scheduleID,
 		WeekdayFilter: filter,
-		Start:         rule.Clock(rand.Int63n(int64(24 * time.Hour))),
-		End:           rule.Clock(rand.Int63n(int64(24 * time.Hour))),
+		Start:         timeutil.Clock(rand.Int63n(int64(24 * time.Hour))),
+		End:           timeutil.Clock(rand.Int63n(int64(24 * time.Hour))),
 		Target:        tgt,
 	})
 }
@@ -218,7 +220,7 @@ func (d *datagen) NewEP() {
 		ID:          gofakeit.UUID(),
 		Name:        d.ids.Gen(idName("Policy")),
 		Description: gofakeit.Sentence(rand.Intn(10) + 3),
-		Repeat:      rand.Intn(5) - 1,
+		Repeat:      rand.Intn(5),
 	})
 }
 
@@ -342,13 +344,15 @@ func (d *datagen) NewAlert(status alert.Status) {
 // NewFavorite will generate a new favorite for the provided user ID.
 func (d *datagen) NewFavorite(userID string) {
 	var tgt assignment.Target
-	switch rand.Intn(3) {
+	switch rand.Intn(4) {
 	case 0:
 		tgt = assignment.ServiceTarget(d.ids.Gen(func() string { return d.Services[rand.Intn(len(d.Services))].ID }, "favSvc", userID))
 	case 1:
 		tgt = assignment.RotationTarget(d.ids.Gen(func() string { return d.Rotations[rand.Intn(len(d.Rotations))].ID }, "favRot", userID))
 	case 2:
 		tgt = assignment.ScheduleTarget(d.ids.Gen(func() string { return d.Schedules[rand.Intn(len(d.Schedules))].ID }, "favSched", userID))
+	case 3:
+		tgt = assignment.EscalationPolicyTarget(d.ids.Gen(func() string { return d.EscalationPolicies[rand.Intn(len(d.EscalationPolicies))].ID }, "favEP", userID))
 	}
 
 	d.Favorites = append(d.Favorites, userFavorite{

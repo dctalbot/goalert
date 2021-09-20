@@ -3,12 +3,13 @@ package log
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/target/goalert/util/sqlutil"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 type logContextKey int
@@ -23,6 +24,11 @@ var defaultLogger = logrus.NewEntry(logrus.StandardLogger())
 var defaultContext = context.Background()
 var verbose = false
 var stacks = false
+
+// SetOutput will change the log output.
+func SetOutput(out io.Writer) {
+	defaultLogger.Logger.SetOutput(out)
+}
 
 // EnableStacks enables stack information via the Source field.
 func EnableStacks() {
@@ -40,7 +46,7 @@ func ErrorsOnly() {
 }
 
 func init() {
-	if terminal.IsTerminal(int(os.Stderr.Fd())) {
+	if term.IsTerminal(int(os.Stderr.Fd())) {
 		logrus.SetFormatter(&terminalFormatter{})
 	}
 }
@@ -81,18 +87,15 @@ func addSource(ctx context.Context, err error) context.Context {
 	return ctx
 }
 
-type causer interface {
-	Cause() error
-}
-
 func findRootSource(err error) error {
 	var rootErr error
 	for {
-		if c, ok := err.(causer); ok {
-			err = c.Cause()
-		} else {
+		nextErr := errors.Unwrap(err)
+		if nextErr == nil {
 			break
 		}
+		err = nextErr
+
 		if _, ok := err.(stackTracer); ok {
 			rootErr = err
 		}

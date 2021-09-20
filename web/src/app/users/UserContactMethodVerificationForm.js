@@ -1,12 +1,11 @@
 import React, { useEffect } from 'react'
+import { useMutation, gql } from '@apollo/client'
 import p from 'prop-types'
 import Grid from '@material-ui/core/Grid'
 import TextField from '@material-ui/core/TextField'
 import LoadingButton from '../loading/components/LoadingButton'
-import gql from 'graphql-tag'
 import { makeStyles } from '@material-ui/core/styles'
 import { FormContainer, FormField } from '../forms'
-import { useMutation } from '@apollo/react-hooks'
 
 /*
  * Triggers sending a verification code to the specified cm
@@ -44,7 +43,7 @@ export default function UserContactMethodVerificationForm(props) {
   function sendAndCatch() {
     // Clear error on new actions.
     props.setSendError(null)
-    sendCode().catch(err => props.setSendError(err.message))
+    sendCode().catch((err) => props.setSendError(err.message))
   }
 
   // Attempt to send a code on load, but it's ok if it fails.
@@ -62,7 +61,7 @@ export default function UserContactMethodVerificationForm(props) {
             color='primary'
             loading={sendCodeStatus.loading}
             disabled={props.disabled}
-            buttonText={'Resend Code'}
+            buttonText='Resend Code'
             noSubmit
             onClick={() => sendAndCatch()}
           />
@@ -76,7 +75,7 @@ export default function UserContactMethodVerificationForm(props) {
             component={TextField}
             type='number'
             step='1'
-            mapOnChangeValue={value => value.toString()}
+            mapOnChangeValue={(value) => value.toString()}
           />
         </Grid>
       </Grid>

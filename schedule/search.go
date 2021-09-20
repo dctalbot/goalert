@@ -40,7 +40,7 @@ type SearchCursor struct {
 	IsFavorite bool   `json:"f"`
 }
 
-var searchTemplate = template.Must(template.New("search").Parse(`
+var searchTemplate = template.Must(template.New("search").Funcs(search.Helpers()).Parse(`
 	SELECT
 		sched.id,
 		sched.name,
@@ -55,8 +55,8 @@ var searchTemplate = template.Must(template.New("search").Parse(`
 	{{if .Omit}}
 		AND NOT sched.id = any(:omit)
 	{{end}}
-	{{if .SearchStr}}
-		AND (sched.name ILIKE :search OR sched.description ILIKE :search)
+	{{if .Search}}
+		AND {{textSearch "search" "sched.name" "sched.description"}}
 	{{end}}
 	{{if .After.Name}}
 		AND
@@ -79,14 +79,6 @@ func (opts renderData) OrderBy() string {
 		return "fav isnull, lower(sched.name)"
 	}
 	return "lower(sched.name)"
-}
-
-func (opts renderData) SearchStr() string {
-	if opts.Search == "" {
-		return ""
-	}
-
-	return "%" + search.Escape(opts.Search) + "%"
 }
 
 func (opts renderData) Normalize() (*renderData, error) {
@@ -113,14 +105,14 @@ func (opts renderData) Normalize() (*renderData, error) {
 
 func (opts renderData) QueryArgs() []sql.NamedArg {
 	return []sql.NamedArg{
-		sql.Named("search", opts.SearchStr()),
+		sql.Named("search", opts.Search),
 		sql.Named("afterName", opts.After.Name),
 		sql.Named("omit", sqlutil.UUIDArray(opts.Omit)),
 		sql.Named("favUserID", opts.FavoritesUserID),
 	}
 }
 
-func (db *DB) Search(ctx context.Context, opts *SearchOptions) ([]Schedule, error) {
+func (store *Store) Search(ctx context.Context, opts *SearchOptions) ([]Schedule, error) {
 	if opts == nil {
 		opts = &SearchOptions{}
 	}
@@ -141,8 +133,8 @@ func (db *DB) Search(ctx context.Context, opts *SearchOptions) ([]Schedule, erro
 		return nil, errors.Wrap(err, "render query")
 	}
 
-	rows, err := db.db.QueryContext(ctx, query, args...)
-	if err == sql.ErrNoRows {
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

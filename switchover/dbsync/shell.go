@@ -163,13 +163,16 @@ func RunShell(oldURL, newURL string) error {
 				if contains(ignoreSyncTables, t.Name) {
 					continue
 				}
+				if t.Name == "change_log" {
+					continue
+				}
 				process = append(process, t)
 			}
 			bar := p.AddBar(int64(len(process)),
 				mpb.BarClearOnComplete(),
 				mpb.PrependDecorators(
 					decor.OnComplete(
-						decor.StaticName("Truncating tables..."),
+						decor.Name("Truncating tables..."),
 						"Truncated all destination tables.")),
 			)
 			for _, t := range process {
@@ -192,7 +195,7 @@ func RunShell(oldURL, newURL string) error {
 				return err
 			}
 			sh.Println(status)
-			sh.Println("change_log disabled")
+			sh.Println("destination DB cleared")
 			return nil
 		},
 	})
@@ -315,7 +318,7 @@ func RunShell(oldURL, newURL string) error {
 			noSwitch := fset.Bool("no-switch", false, "Run the entire procedure, but don't actually switch DB at the end.")
 			err := fset.Parse(sh.Args)
 			if err != nil {
-				if err == flag.ErrHelp {
+				if errors.Is(err, flag.ErrHelp) {
 					return nil
 				}
 				return err

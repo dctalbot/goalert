@@ -3,24 +3,32 @@ package oncall
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pkg/errors"
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/override"
 	"github.com/target/goalert/permission"
+	"github.com/target/goalert/schedule"
 	"github.com/target/goalert/schedule/rule"
 	"github.com/target/goalert/util"
 	"github.com/target/goalert/util/sqlutil"
 	"github.com/target/goalert/validation/validate"
-	"time"
-
-	"github.com/pkg/errors"
 )
 
 // Store allows retrieving and calculating on-call information.
 type Store interface {
 	OnCallUsersByService(ctx context.Context, serviceID string) ([]ServiceOnCallUser, error)
-
-	// HistoryBySchedule(ctx context.Context, stepID string, start, end time.Time) ([]Shift, error)
+	OnCallUsersBySchedule(ctx context.Context, scheduleID string) ([]ScheduleOnCallUser, error)
 	HistoryBySchedule(ctx context.Context, scheduleID string, start, end time.Time) ([]Shift, error)
+}
+
+// ScheduleOnCallUser represents a currently on-call user for a schedule.
+type ScheduleOnCallUser struct {
+	ID   string
+	Name string
 }
 
 // ServiceOnCallUser represents a currently on-call user for a service.
@@ -45,24 +53,27 @@ type Shift struct {
 type DB struct {
 	db *sql.DB
 
-	onCallUsersSvc *sql.Stmt
-	schedOverrides *sql.Stmt
+	onCallUsersSvc      *sql.Stmt
+	onCallUsersSchedule *sql.Stmt
+	schedOverrides      *sql.Stmt
 
 	schedOnCall *sql.Stmt
 	schedTZ     *sql.Stmt
 	schedRot    *sql.Stmt
 	rotParts    *sql.Stmt
 
-	ruleStore rule.Store
+	ruleStore  rule.Store
+	schedStore *schedule.Store
 }
 
 // NewDB will create a new DB, preparing required statements using the provided context.
-func NewDB(ctx context.Context, db *sql.DB, ruleStore rule.Store) (*DB, error) {
+func NewDB(ctx context.Context, db *sql.DB, ruleStore rule.Store, schedStore *schedule.Store) (*DB, error) {
 	p := &util.Prepare{DB: db, Ctx: ctx}
 
 	return &DB{
-		db:        db,
-		ruleStore: ruleStore,
+		db:         db,
+		ruleStore:  ruleStore,
+		schedStore: schedStore,
 
 		schedOverrides: p.P(`
 			select
@@ -86,7 +97,12 @@ func NewDB(ctx context.Context, db *sql.DB, ruleStore rule.Store) (*DB, error) {
 			where svc.id = $1
 			order by step.step_number, oc.start_time
 		`),
-
+		onCallUsersSchedule: p.P(`
+			SELECT s.user_id, u.name
+			FROM schedule_on_call_users s
+			JOIN users u ON u.id = s.user_id
+			WHERE s.schedule_id = $1 AND s.end_time IS NULL
+		`),
 		schedOnCall: p.P(`
 			select
 				user_id,
@@ -95,7 +111,7 @@ func NewDB(ctx context.Context, db *sql.DB, ruleStore rule.Store) (*DB, error) {
 			from schedule_on_call_users
 			where
 				schedule_id = $1 and
-				($2, $3) OVERLAPS (start_time, coalesce(end_time, 'infinity')) and
+				tstzrange($2, $3) && tstzrange(start_time, end_time) and
 				(end_time isnull or (end_time - start_time) > '1 minute'::interval)
 		`),
 		schedTZ: p.P(`select time_zone, now() from schedules where id = $1`),
@@ -153,6 +169,35 @@ func (db *DB) OnCallUsersByService(ctx context.Context, serviceID string) ([]Ser
 	return onCall, nil
 }
 
+func (db *DB) OnCallUsersBySchedule(ctx context.Context, scheduleID string) ([]ScheduleOnCallUser, error) {
+	err := permission.LimitCheckAny(ctx, permission.User)
+	if err != nil {
+		return nil, err
+	}
+	err = validate.UUID("ScheduleID", scheduleID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.onCallUsersSchedule.QueryContext(ctx, scheduleID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch on-call users for schedule '%s': %w", scheduleID, err)
+	}
+	defer rows.Close()
+
+	var result []ScheduleOnCallUser
+	for rows.Next() {
+		var u ScheduleOnCallUser
+		err = rows.Scan(&u.ID, &u.Name)
+		if err != nil {
+			return nil, fmt.Errorf("scan on-call user entry #%d for schedule '%s': %w", len(result), scheduleID, err)
+		}
+
+		result = append(result, u)
+	}
+
+	return result, nil
+}
+
 // HistoryBySchedule will return the list of shifts that overlap the start and end time for the given schedule.
 func (db *DB) HistoryBySchedule(ctx context.Context, scheduleID string, start, end time.Time) ([]Shift, error) {
 	err := permission.LimitCheckAny(ctx, permission.User)
@@ -185,10 +230,10 @@ func (db *DB) HistoryBySchedule(ctx context.Context, scheduleID string, start, e
 		return nil, errors.Wrap(err, "lookup schedule rotations")
 	}
 	defer rows.Close()
-	rots := make(map[string]*resolvedRotation)
+	rots := make(map[string]*ResolvedRotation)
 	var rotIDs []string
 	for rows.Next() {
-		var rot resolvedRotation
+		var rot ResolvedRotation
 		var rotTZ string
 		err = rows.Scan(&rot.ID, &rot.Type, &rot.Start, &rot.ShiftLength, &rotTZ, &rot.CurrentIndex, &rot.CurrentStart)
 		if err != nil {
@@ -222,15 +267,15 @@ func (db *DB) HistoryBySchedule(ctx context.Context, scheduleID string, start, e
 		return nil, errors.Wrap(err, "lookup schedule rules")
 	}
 
-	var rules []resolvedRule
+	var rules []ResolvedRule
 	for _, r := range rawRules {
 		if r.Target.TargetType() == assignment.TargetTypeRotation {
-			rules = append(rules, resolvedRule{
+			rules = append(rules, ResolvedRule{
 				Rule:     r,
 				Rotation: rots[r.Target.TargetID()],
 			})
 		} else {
-			rules = append(rules, resolvedRule{Rule: r})
+			rules = append(rules, ResolvedRule{Rule: r})
 		}
 	}
 
@@ -268,6 +313,14 @@ func (db *DB) HistoryBySchedule(ctx context.Context, scheduleID string, start, e
 		ov.RemoveUserID = rem.String
 		overrides = append(overrides, ov)
 	}
+	id, err := uuid.Parse(scheduleID)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse schedule ID")
+	}
+	tempScheds, err := db.schedStore.TemporarySchedules(ctx, tx, id)
+	if err != nil {
+		return nil, errors.Wrap(err, "lookup temporary schedules")
+	}
 
 	err = tx.Commit()
 	if err != nil {
@@ -279,11 +332,12 @@ func (db *DB) HistoryBySchedule(ctx context.Context, scheduleID string, start, e
 		return nil, errors.Wrap(err, "load time zone info")
 	}
 	s := state{
-		rules:     rules,
-		overrides: overrides,
-		history:   userHistory,
-		now:       now,
-		loc:       tz,
+		rules:      rules,
+		overrides:  overrides,
+		history:    userHistory,
+		now:        now,
+		loc:        tz,
+		tempScheds: tempScheds,
 	}
 
 	return s.CalculateShifts(start, end), nil

@@ -3,6 +3,8 @@ package rule
 import (
 	"testing"
 	"time"
+
+	"github.com/target/goalert/util/timeutil"
 )
 
 const timeFmt = "Mon Jan _2 3:04PM 2006"
@@ -10,11 +12,13 @@ const timeFmt = "Mon Jan _2 3:04PM 2006"
 func TestRule_IsActive(t *testing.T) {
 
 	test := func(r Rule, tm time.Time, expected bool) {
+		t.Helper()
 		name := r.String() + "/" + tm.Format(timeFmt)
 		if r.Start > r.End {
 			name += "(overnight)"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Helper()
 			result := r.IsActive(tm)
 			if result != expected {
 				t.Errorf("got '%t'; want '%t'", result, expected)
@@ -23,8 +27,8 @@ func TestRule_IsActive(t *testing.T) {
 	}
 
 	r := Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(20, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(20, 0),
 	}
 	r.SetDay(time.Monday, true)
 
@@ -62,10 +66,10 @@ func TestRule_IsActive(t *testing.T) {
 
 	// weekday filters
 	r = Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(20, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(20, 0),
 	}
-	r.WeekdayFilter = WeekdayFilter{0, 1, 1, 1, 1, 1, 0} // M-F
+	r.WeekdayFilter = timeutil.WeekdayFilter{0, 1, 1, 1, 1, 1, 0} // M-F
 
 	data = []struct {
 		Time   time.Time
@@ -85,10 +89,10 @@ func TestRule_IsActive(t *testing.T) {
 
 	// contig. filters
 	r = Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(8, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(8, 0),
 	}
-	r.WeekdayFilter = WeekdayFilter{0, 1, 1, 1, 1, 1, 0} // M-F
+	r.WeekdayFilter = timeutil.WeekdayFilter{0, 1, 1, 1, 1, 1, 0} // M-F
 
 	data = []struct {
 		Time   time.Time
@@ -110,10 +114,10 @@ func TestRule_IsActive(t *testing.T) {
 
 	// weekday overnight
 	r = Rule{
-		Start: NewClock(20, 0),
-		End:   NewClock(8, 0),
+		Start: timeutil.NewClock(20, 0),
+		End:   timeutil.NewClock(8, 0),
 	}
-	r.WeekdayFilter = WeekdayFilter{0, 1, 1, 1, 1, 1, 0} // M-F
+	r.WeekdayFilter = timeutil.WeekdayFilter{0, 1, 1, 1, 1, 1, 0} // M-F
 
 	data = []struct {
 		Time   time.Time
@@ -149,11 +153,13 @@ func TestRule_IsActive(t *testing.T) {
 func TestRule_StartTime(t *testing.T) {
 
 	test := func(r Rule, start, expected time.Time) {
+		t.Helper()
 		name := r.String() + "/" + start.Format(timeFmt)
 		if r.Start > r.End {
 			name += "(overnight)"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Helper()
 			result := r.StartTime(start)
 			if !result.Equal(expected) {
 				t.Errorf("got '%s'; want '%s'", result.Format(timeFmt), expected.Format(timeFmt))
@@ -162,17 +168,17 @@ func TestRule_StartTime(t *testing.T) {
 	}
 
 	test(Rule{
-		Start:         NewClock(8, 0),
-		End:           NewClock(20, 0),
-		WeekdayFilter: WeekdayFilter{0, 1, 1, 0, 0, 0, 0},
+		Start:         timeutil.NewClock(8, 0),
+		End:           timeutil.NewClock(20, 0),
+		WeekdayFilter: timeutil.WeekdayFilter{0, 1, 1, 0, 0, 0, 0},
 	},
 		time.Date(2017, 7, 25, 8, 0, 0, 0, time.UTC),
 		time.Date(2017, 7, 25, 8, 0, 0, 0, time.UTC),
 	)
 
 	r := Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(20, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(20, 0),
 	}
 	r.SetDay(time.Monday, true)
 	// jul 24 2017 is a Monday
@@ -197,8 +203,8 @@ func TestRule_StartTime(t *testing.T) {
 	}
 
 	r = Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(20, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(20, 0),
 	}
 	r.SetDay(time.Friday, true)
 	r.SetDay(time.Saturday, true)
@@ -217,8 +223,8 @@ func TestRule_StartTime(t *testing.T) {
 	}
 
 	r = Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(8, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(8, 0),
 	}
 	r.SetDay(time.Monday, true)
 	r.SetDay(time.Tuesday, true)
@@ -247,10 +253,10 @@ func TestRule_StartTime(t *testing.T) {
 	}
 
 	r = Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(20, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(20, 0),
 	}
-	r.WeekdayFilter = everyDay
+	r.WeekdayFilter = timeutil.EveryDay()
 	data = []struct{ Start, Expected time.Time }{
 
 		{Start: time.Date(2017, 7, 20, 8, 0, 0, 0, time.UTC), Expected: time.Date(2017, 7, 20, 8, 0, 0, 0, time.UTC)},
@@ -271,8 +277,8 @@ func TestRule_StartTime(t *testing.T) {
 
 	// overnight
 	r = Rule{
-		Start: NewClock(20, 0),
-		End:   NewClock(8, 0),
+		Start: timeutil.NewClock(20, 0),
+		End:   timeutil.NewClock(8, 0),
 	}
 	r.SetDay(time.Monday, true)
 	// July 24th is a Monday
@@ -292,11 +298,13 @@ func TestRule_StartTime(t *testing.T) {
 
 func TestRule_EndTime(t *testing.T) {
 	test := func(r Rule, start, expected time.Time) {
+		t.Helper()
 		name := r.String() + "/" + start.Format(timeFmt)
 		if r.Start > r.End {
 			name += "(overnight)"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Helper()
 			result := r.EndTime(start)
 			if !result.Equal(expected) {
 				t.Errorf("got '%s'; want '%s'", result.Format(timeFmt), expected.Format(timeFmt))
@@ -305,8 +313,8 @@ func TestRule_EndTime(t *testing.T) {
 	}
 
 	r := Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(20, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(20, 0),
 	}
 	r.SetDay(time.Monday, true)
 
@@ -320,8 +328,8 @@ func TestRule_EndTime(t *testing.T) {
 	}
 
 	r = Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(20, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(20, 0),
 	}
 	r.SetDay(time.Monday, true)
 	r.SetDay(time.Tuesday, true)
@@ -337,8 +345,8 @@ func TestRule_EndTime(t *testing.T) {
 	}
 
 	r = Rule{
-		Start: NewClock(8, 0),
-		End:   NewClock(8, 0),
+		Start: timeutil.NewClock(8, 0),
+		End:   timeutil.NewClock(8, 0),
 	}
 	r.SetDay(time.Monday, true)
 	r.SetDay(time.Tuesday, true)
@@ -354,9 +362,9 @@ func TestRule_EndTime(t *testing.T) {
 	}
 
 	r = Rule{
-		Start:         NewClock(8, 0),
-		End:           NewClock(20, 0),
-		WeekdayFilter: everyDay,
+		Start:         timeutil.NewClock(8, 0),
+		End:           timeutil.NewClock(20, 0),
+		WeekdayFilter: timeutil.EveryDay(),
 	}
 
 	data = []struct{ Start, Expected time.Time }{
@@ -371,8 +379,8 @@ func TestRule_EndTime(t *testing.T) {
 
 	// overnight
 	r = Rule{
-		Start: NewClock(20, 0),
-		End:   NewClock(8, 0),
+		Start: timeutil.NewClock(20, 0),
+		End:   timeutil.NewClock(8, 0),
 	}
 	r.SetDay(time.Monday, true)
 
@@ -387,7 +395,7 @@ func TestRule_EndTime(t *testing.T) {
 		test(r, d.Start, d.Expected)
 	}
 
-	r.WeekdayFilter = everyDay
+	r.WeekdayFilter = timeutil.EveryDay()
 
 	data = []struct{ Start, Expected time.Time }{
 		{Start: time.Date(2017, 7, 24, 8, 0, 0, 0, time.UTC), Expected: time.Date(2017, 7, 25, 8, 0, 0, 0, time.UTC)},

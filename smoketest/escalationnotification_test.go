@@ -1,9 +1,10 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestEscalationNotification ensures that notification rules
@@ -23,7 +24,7 @@ func TestEscalationNotification(t *testing.T) {
 	values
 		({{uuid "uid"}}, {{uuid "c1"}}, 0),
 		({{uuid "uid"}}, {{uuid "c2"}}, 0),
-		({{uuid "uid"}}, {{uuid "c1"}}, 1);
+		({{uuid "uid"}}, {{uuid "c1"}}, 30);
 
 	insert into escalation_policies (id, name, repeat) 
 	values 
@@ -47,32 +48,27 @@ func TestEscalationNotification(t *testing.T) {
 	h := harness.NewHarness(t, sql, "ids-to-uuids")
 	defer h.Close()
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 	d2 := tw.Device(h.Phone("2"))
 
 	d1.ExpectSMS("testing")
 	d2.ExpectVoice("testing")
-	tw.WaitAndAssert()
 
 	h.Escalate(1, 0) // results in the start of a 2nd cycle
 
 	d1.ExpectSMS("testing")
 	d2.ExpectVoice("testing")
-	tw.WaitAndAssert()
 
-	h.FastForward(2 * time.Minute) // ensure both rules have elapsed
+	h.FastForward(30 * time.Minute) // ensure both rules have elapsed
 
-	// 1 sms from the first step, 1 from the escalated one
+	// 1 sms from the first step, 1 from the escalated one, should be de-duplicated
 	d1.ExpectSMS("testing")
-	d1.ExpectSMS("testing")
-	tw.WaitAndAssert()
 
 	h.Escalate(1, 1)
 	d1.ExpectSMS("testing")
 	d2.ExpectVoice("testing")
-	tw.WaitAndAssert()
 
-	h.FastForward(2 * time.Minute)
+	h.FastForward(30 * time.Minute)
 	d1.ExpectSMS("testing")
 }

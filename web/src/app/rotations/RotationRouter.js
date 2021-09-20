@@ -1,5 +1,5 @@
 import React from 'react'
-import gql from 'graphql-tag'
+import { gql } from '@apollo/client'
 import { Switch, Route } from 'react-router-dom'
 import { PageNotFound } from '../error-pages/Errors'
 import RotationDetails from './RotationDetails'
@@ -23,35 +23,35 @@ const query = gql`
   }
 `
 
-export default class RotationRouter extends React.PureComponent {
-  render() {
+export default function RotationRouter() {
+  function renderList() {
     return (
-      <Switch>
-        <Route exact path='/rotations' component={this.renderList} />
-        <Route
-          exact
-          path='/rotations/:rotationID'
-          render={({ match }) => (
-            <RotationDetails rotationID={match.params.rotationID} />
-          )}
-        />
-        <Route component={PageNotFound} />
-      </Switch>
+      <SimpleListPage
+        query={query}
+        variables={{ input: { favoritesFirst: true } }}
+        mapDataNode={(n) => ({
+          title: n.name,
+          subText: n.description,
+          url: n.id,
+          isFavorite: n.isFavorite,
+        })}
+        createForm={<RotationCreateDialog />}
+        createLabel='Rotation'
+      />
     )
   }
 
-  renderList = () => (
-    <SimpleListPage
-      query={query}
-      variables={{ input: { favoritesFirst: true } }}
-      mapDataNode={n => ({
-        title: n.name,
-        subText: n.description,
-        url: n.id,
-        isFavorite: n.isFavorite,
-      })}
-      createForm={<RotationCreateDialog />}
-      createLabel='Rotation'
-    />
+  return (
+    <Switch>
+      <Route exact path='/rotations' render={renderList} />
+      <Route
+        exact
+        path='/rotations/:rotationID'
+        render={({ match }) => (
+          <RotationDetails rotationID={match.params.rotationID} />
+        )}
+      />
+      <Route component={PageNotFound} />
+    </Switch>
   )
 }

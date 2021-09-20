@@ -25,7 +25,7 @@ func TestGenericAPIClose(t *testing.T) {
 	insert into user_notification_rules (user_id, contact_method_id, delay_minutes)
 	values
 		({{uuid "user"}}, {{uuid "cm1"}}, 0),
-		({{uuid "user"}}, {{uuid "cm1"}}, 1);
+		({{uuid "user"}}, {{uuid "cm1"}}, 30);
 
 	insert into escalation_policies (id, name)
 	values
@@ -76,20 +76,17 @@ func TestGenericAPIClose(t *testing.T) {
 	fire(key, "test3", "dedup", false)
 	fire(key, "test4", "", true) // should not open one in the first place
 
-	d := h.Twilio().Device(h.Phone("1"))
+	d := h.Twilio(t).Device(h.Phone("1"))
 
 	d.ExpectSMS("test1")
 	d.ExpectSMS("test2")
 	d.ExpectSMS("test3")
-	h.Twilio().WaitAndAssert()
 
 	fire(key, "test2", "", true)
 	fire(key, "test3", "dedup", true)
 
-	h.FastForward(time.Minute)
+	h.FastForward(30 * time.Minute)
 
 	d.ExpectSMS("test1")
 
-	h.Trigger()
-	time.Sleep(5 * time.Second)
 }

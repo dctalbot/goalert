@@ -44,12 +44,12 @@ export function getSchedule(key, value) {
  */
 export function getScheduleTargets(key, value) {
   const s = value[key]
-  let targets = []
+  const targets = []
   const fts = s.followTheSunRotation.enable === 'yes'
 
   // return just the users as schedule targets if rotation type is set to "never"
   if (s.rotation.type === 'never') {
-    return s.users.map(id => ({
+    return s.users.map((id) => ({
       target: {
         id,
         type: 'user',
@@ -63,13 +63,13 @@ export function getScheduleTargets(key, value) {
   const duration =
     type === 'daily' ? { day: 1 } : type === 'weekly' ? { week: 1 } : null
 
-  const target = isFTS => {
+  const target = (isFTS) => {
     let tzText = isFTS ? s.followTheSunRotation.timeZone : s.timeZone
     if (isFTS && s.followTheSunRotation.timeZone === s.timeZone) {
       tzText = s.followTheSunRotation.timeZone + ' FTS'
     }
 
-    let name =
+    const name =
       value.teamName +
       (key.includes('primary') ? ' Primary ' : ' Secondary ') +
       tzText +
@@ -79,9 +79,7 @@ export function getScheduleTargets(key, value) {
       name: name.replace(/\//g, '-'),
       description: DESC,
       timeZone: isFTS ? s.followTheSunRotation.timeZone : s.timeZone,
-      start: DateTime.fromISO(s.rotation.startDate)
-        .minus(duration)
-        .toISO(),
+      start: DateTime.fromISO(s.rotation.startDate).minus(duration).toISO(),
       type: s.rotation.type,
       userIDs: isFTS ? s.followTheSunRotation.users : s.users,
     }

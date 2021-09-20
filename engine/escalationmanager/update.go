@@ -3,6 +3,7 @@ package escalationmanager
 import (
 	"context"
 	"database/sql"
+
 	alertlog "github.com/target/goalert/alert/log"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/util/log"
@@ -49,8 +50,9 @@ func (db *DB) update(ctx context.Context, all bool, alertID *int) error {
 
 	err = db.processEscalations(ctx, db.newPolicies, func(rows *sql.Rows) (int, *alertlog.EscalationMetaData, error) {
 		var id int
-		err := rows.Scan(&id)
-		return id, &alertlog.EscalationMetaData{}, err
+		var meta alertlog.EscalationMetaData
+		err := rows.Scan(&id, &meta.NoOneOnCall)
+		return id, &meta, err
 	})
 	if err != nil {
 		return errors.Wrap(err, "trigger new policies")
@@ -59,7 +61,7 @@ func (db *DB) update(ctx context.Context, all bool, alertID *int) error {
 	err = db.processEscalations(ctx, db.deletedSteps, func(rows *sql.Rows) (int, *alertlog.EscalationMetaData, error) {
 		var id int
 		var meta alertlog.EscalationMetaData
-		err := rows.Scan(&id, &meta.Repeat, &meta.NewStepIndex)
+		err := rows.Scan(&id, &meta.Repeat, &meta.NewStepIndex, &meta.NoOneOnCall)
 		return id, &meta, err
 	})
 	if err != nil {
@@ -69,7 +71,7 @@ func (db *DB) update(ctx context.Context, all bool, alertID *int) error {
 	err = db.processEscalations(ctx, db.normalEscalation, func(rows *sql.Rows) (int, *alertlog.EscalationMetaData, error) {
 		var id int
 		var meta alertlog.EscalationMetaData
-		err := rows.Scan(&id, &meta.Repeat, &meta.NewStepIndex, &meta.OldDelayMinutes, &meta.Forced)
+		err := rows.Scan(&id, &meta.Repeat, &meta.NewStepIndex, &meta.OldDelayMinutes, &meta.Forced, &meta.NoOneOnCall)
 		return id, &meta, err
 	})
 	if err != nil {
@@ -92,23 +94,18 @@ func (db *DB) processEscalations(ctx context.Context, stmt *sql.Stmt, scan func(
 	}
 	defer rows.Close()
 
-	type record struct {
-		alertID int
-		esc     *alertlog.EscalationMetaData
-	}
+	batch := make(map[alertlog.EscalationMetaData][]int)
 
-	var data []record
 	for rows.Next() {
-		var rec record
-		rec.alertID, rec.esc, err = scan(rows)
+		id, esc, err := scan(rows)
 		if err != nil {
 			return err
 		}
-		data = append(data, rec)
+		batch[*esc] = append(batch[*esc], id)
 	}
 
-	for _, rec := range data {
-		err = db.log.LogTx(ctx, tx, rec.alertID, alertlog.TypeEscalated, rec.esc)
+	for meta, ids := range batch {
+		err = db.log.LogManyTx(ctx, tx, ids, alertlog.TypeEscalated, meta)
 		if err != nil {
 			return errors.Wrap(err, "log escalation")
 		}

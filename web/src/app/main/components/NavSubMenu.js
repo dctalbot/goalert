@@ -13,16 +13,13 @@ import { urlPathSelector } from '../../selectors/url'
 import { useSelector } from 'react-redux'
 import { PropTypes as p } from 'prop-types'
 
-const useStyles = makeStyles(theme => {
+const useStyles = makeStyles((theme) => {
   const { nav, navSelected } = styles(theme)
   return {
     nav,
     navSelected,
     subMenu: {
       padding: '0',
-    },
-    parentItem: {
-      color: theme.palette.primary.main,
     },
     subMenuLinkText: {
       paddingLeft: '3.5rem',
@@ -41,17 +38,15 @@ const useStyles = makeStyles(theme => {
     dropdownClosed: {
       transform: 'rotate(-90deg)',
     },
-    listItemText: {
-      color: theme.palette.primary.main,
-    },
   }
 })
 
 export default function NavSubMenu(props) {
-  const { parentIcon, parentTitle, path, subMenuRoutes } = props
+  const { parentIcon, parentTitle, path, subMenuRoutes, closeMobileSidebar } =
+    props
   const classes = useStyles()
   const pathname = useSelector(urlPathSelector)
-  let isRoute = pathname.startsWith(path)
+  const isRoute = pathname.startsWith(path)
 
   function renderParentLink(IconComponent, label) {
     return (
@@ -60,19 +55,15 @@ export default function NavSubMenu(props) {
           <IconComponent />
         </ListItemIcon>
         <ListItemText
-          className={classes.parentItem}
           disableTypography
           primary={
-            <Typography
-              variant='subtitle1'
-              component='p'
-              className={classes.listItemText}
-            >
+            <Typography variant='subtitle1' component='p'>
               {label}
             </Typography>
           }
         />
         <ExpandMoreIcon
+          color='action'
           className={
             classes.dropdown +
             ' ' +
@@ -84,7 +75,7 @@ export default function NavSubMenu(props) {
   }
 
   function renderSubMenu(subMenuRoutes) {
-    let subMenu = subMenuRoutes.map((route, key) => {
+    const subMenu = subMenuRoutes.map((route, key) => {
       return (
         <NavLink
           exact
@@ -92,6 +83,7 @@ export default function NavSubMenu(props) {
           key={key}
           className={classes.nav}
           to={route.path}
+          onClick={closeMobileSidebar}
         >
           <ListItem button tabIndex={-1}>
             <ListItemText className={classes.subMenuLinkText}>
@@ -122,4 +114,5 @@ NavSubMenu.propTypes = {
   parentTitle: p.string.isRequired,
   path: p.string.isRequired,
   subMenuRoutes: p.array.isRequired,
+  closeMobileSidebar: p.func.isRequired,
 }

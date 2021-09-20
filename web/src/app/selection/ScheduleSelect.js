@@ -1,8 +1,8 @@
-import gql from 'graphql-tag'
+import { gql } from '@apollo/client'
 import { makeQuerySelect } from './QuerySelect'
 
 const query = gql`
-  query($input: ScheduleSearchOptions) {
+  query ($input: ScheduleSearchOptions) {
     schedules(input: $input) {
       nodes {
         id
@@ -14,7 +14,7 @@ const query = gql`
 `
 
 const valueQuery = gql`
-  query($id: ID!) {
+  query ($id: ID!) {
     schedule(id: $id) {
       id
       name
@@ -25,7 +25,7 @@ const valueQuery = gql`
 
 export const ScheduleSelect = makeQuerySelect('ScheduleSelect', {
   variables: { favoritesFirst: true },
-  defaultQueryVariables: { favoritesOnly: true },
+  defaultQueryVariables: { favoritesFirst: true },
   query,
   valueQuery,
 })

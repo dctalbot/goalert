@@ -2,7 +2,7 @@
 
 GoAlert provides on-call scheduling, automated escalations and notifications (like SMS or voice calls) to automatically engage the right person, the right way, and at the right time.
 
-![image](https://user-images.githubusercontent.com/23565500/58896528-c1cdb100-86bb-11e9-96f1-a57198ece062.png)
+![image](https://user-images.githubusercontent.com/11381794/78996595-889b7400-7b0a-11ea-90e9-dd10b0116b1a.png)
 
 ## Installation
 
@@ -13,7 +13,7 @@ See our [Getting Started Guide](./docs/getting-started.md) for running GoAlert i
 ### Quick Start
 
 ```bash
-docker run -it --rm -p 8081:8081 goalert/all-in-one
+docker run -it --rm -p 8081:8081 goalert/all-in-one-demo
 ```
 
 GoAlert will be running at [localhost:8081](http://localhost:8081). You can login with `admin/admin123`.

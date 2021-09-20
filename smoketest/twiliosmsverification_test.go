@@ -2,11 +2,12 @@ package smoketest
 
 import (
 	"fmt"
-	"github.com/target/goalert/smoketest/harness"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestTwilioSMSVerification checks that a verification SMS is processed.
@@ -23,23 +24,6 @@ func TestTwilioSMSVerification(t *testing.T) {
 		insert into user_notification_rules (id, user_id, delay_minutes, contact_method_id)
 		values
 			({{uuid "nr1"}}, {{uuid "user"}}, 0, {{uuid "cm1"}});
-		insert into escalation_policies (id, name) 
-		values
-			({{uuid "eid"}}, 'esc policy');
-		insert into escalation_policy_steps (id, escalation_policy_id)
-		values
-			({{uuid "esid"}}, {{uuid "eid"}});
-		insert into escalation_policy_actions (escalation_policy_step_id, user_id) 
-		values 
-			({{uuid "esid"}}, {{uuid "user"}});
-	
-		insert into services (id, escalation_policy_id, name) 
-		values
-			({{uuid "sid"}}, {{uuid "eid"}}, 'service');
-	
-		insert into alerts (service_id, description) 
-		values
-			({{uuid "sid"}}, 'testing');
 	`
 
 	h := harness.NewHarness(t, sqlQuery, "add-verification-code")
@@ -64,11 +48,10 @@ func TestTwilioSMSVerification(t *testing.T) {
 			})
 		}
 	`, smsID))
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 
 	msg := d1.ExpectSMS("verification")
-	tw.WaitAndAssert() // wait for code, and ensure no notifications went out
 
 	codeStr := strings.Map(func(r rune) rune {
 		if r >= '0' && r <= '9' {

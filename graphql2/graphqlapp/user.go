@@ -4,6 +4,10 @@ import (
 	context "context"
 	"database/sql"
 
+	"github.com/target/goalert/auth"
+	"github.com/target/goalert/calendarsubscription"
+	"github.com/target/goalert/validation/validate"
+
 	"github.com/pkg/errors"
 	"github.com/target/goalert/escalation"
 	"github.com/target/goalert/graphql2"
@@ -15,8 +19,26 @@ import (
 )
 
 type User App
+type UserSession App
 
 func (a *App) User() graphql2.UserResolver { return (*User)(a) }
+
+func (a *App) UserSession() graphql2.UserSessionResolver { return (*UserSession)(a) }
+
+func (a *User) Sessions(ctx context.Context, obj *user.User) ([]auth.UserSession, error) {
+	return a.AuthHandler.FindAllUserSessions(ctx, obj.ID)
+}
+func (a *UserSession) Current(ctx context.Context, obj *auth.UserSession) (bool, error) {
+	src := permission.Source(ctx)
+	if src == nil {
+		return false, nil
+	}
+	if src.Type != permission.SourceTypeAuthProvider {
+		return false, nil
+	}
+
+	return obj.ID == src.ID, nil
+}
 
 func (a *User) AuthSubjects(ctx context.Context, obj *user.User) ([]user.AuthSubject, error) {
 	return a.UserStore.FindAllAuthSubjectsForUser(ctx, obj.ID)
@@ -31,9 +53,56 @@ func (a *User) ContactMethods(ctx context.Context, obj *user.User) ([]contactmet
 func (a *User) NotificationRules(ctx context.Context, obj *user.User) ([]notificationrule.NotificationRule, error) {
 	return a.NRStore.FindAll(ctx, obj.ID)
 }
+func (a *User) CalendarSubscriptions(ctx context.Context, obj *user.User) ([]calendarsubscription.CalendarSubscription, error) {
+	return a.CalSubStore.FindAllByUser(ctx, obj.ID)
+}
 
 func (a *User) OnCallSteps(ctx context.Context, obj *user.User) ([]escalation.Step, error) {
 	return a.PolicyStore.FindAllOnCallStepsForUserTx(ctx, nil, obj.ID)
+}
+
+func (a *Mutation) CreateUser(ctx context.Context, input graphql2.CreateUserInput) (*user.User, error) {
+	var newUser *user.User
+
+	// NOTE input.username must be validated before input.name
+	// user's name defaults to input.username and a user must be created before an auth_basic_user
+	err := validate.Username("Username", input.Username)
+	if err != nil {
+		return nil, err
+	}
+
+	// user default values
+	usr := &user.User{
+		Name: input.Username,
+		Role: permission.RoleUser,
+	}
+
+	if input.Name != nil {
+		usr.Name = *input.Name
+	}
+
+	if input.Email != nil {
+		usr.Email = *input.Email
+	}
+
+	if input.Role != nil {
+		usr.Role = permission.Role(*input.Role)
+	}
+
+	err = withContextTx(ctx, a.DB, func(ctx context.Context, tx *sql.Tx) error {
+		var err error
+		newUser, err = a.UserStore.InsertTx(ctx, tx, usr)
+		if err != nil {
+			return err
+		}
+		err = a.AuthBasicStore.CreateTx(ctx, tx, newUser.ID, input.Username, input.Password)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	return newUser, err
 }
 
 func (a *Mutation) DeleteUser(ctx context.Context, id string) (bool, error) {
@@ -49,11 +118,16 @@ func (a *Mutation) UpdateUser(ctx context.Context, input graphql2.UpdateUserInpu
 		if err != nil {
 			return err
 		}
+
+		if input.Role != nil {
+			err = a.UserStore.SetUserRoleTx(ctx, tx, input.ID, permission.Role(*input.Role))
+			if err != nil {
+				return err
+			}
+		}
+
 		if input.Name != nil {
 			usr.Name = *input.Name
-		}
-		if input.Role != nil {
-			usr.Role = permission.Role(*input.Role)
 		}
 		if input.Email != nil {
 			usr.Email = *input.Email
@@ -92,6 +166,12 @@ func (q *Query) Users(ctx context.Context, opts *graphql2.UserSearchOptions, fir
 	if searchOpts.Limit == 0 {
 		searchOpts.Limit = 15
 	}
+	if opts.CMValue != nil {
+		searchOpts.CMValue = *opts.CMValue
+	}
+	if opts.CMType != nil {
+		searchOpts.CMType = *opts.CMType
+	}
 
 	searchOpts.Limit++
 	users, err := q.UserStore.Search(ctx, &searchOpts)
@@ -100,6 +180,7 @@ func (q *Query) Users(ctx context.Context, opts *graphql2.UserSearchOptions, fir
 	}
 
 	conn = new(graphql2.UserConnection)
+	conn.PageInfo = &graphql2.PageInfo{}
 	if len(users) == searchOpts.Limit {
 		users = users[:len(users)-1]
 		conn.PageInfo.HasNextPage = true

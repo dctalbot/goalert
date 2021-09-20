@@ -1,8 +1,7 @@
+/* eslint @typescript-eslint/no-var-requires: 0 */
 // Initialization
 const webpack = require('webpack')
-
-// File ops
-const HtmlWebpackPlugin = require('html-webpack-plugin')
+const CopyPlugin = require('copy-webpack-plugin')
 
 // Folder ops
 const path = require('path')
@@ -10,30 +9,25 @@ const path = require('path')
 // Constants
 const APP = path.join(__dirname, 'app')
 const BUILD = path.join(__dirname, 'build')
-const TEMPLATE = path.join(__dirname, 'app/templates/index.html')
 
-module.exports = {
+module.exports = (env) => ({
   mode: 'production',
   entry: {
     app: APP,
   },
   output: {
     path: BUILD,
-    filename: 'static/[name].[chunkhash].js',
-    chunkFilename: 'static/[chunkhash].js',
-    publicPath: '/',
+    filename: 'static/[name].js',
   },
   resolve: {
-    extensions: ['.js', '.jsx', '.css'],
+    extensions: ['.mjs', '.ts', '.tsx', '.js', '.jsx', '.css'],
   },
   module: {
     rules: [
+      { test: /lodash/, loader: 'strict-loader' },
       {
-        test: /\.jsx?$/,
-        use: [
-          'babel-loader',
-          { loader: 'ifdef-loader', options: { production: true, HMR: false } },
-        ],
+        test: /\.(t|j)sx?$/,
+        use: ['babel-loader'],
         include: [APP],
       },
       {
@@ -51,18 +45,14 @@ module.exports = {
       },
       {
         test: /\.md$/,
-        use: 'raw-loader',
+        type: 'asset/source',
       },
       {
         test: /\.(gif|png|jpe?g|svg|ico|webp)$/i,
-        use: [
-          {
-            loader: 'file-loader',
-            options: {
-              name: 'static/[hash].[ext]',
-            },
-          },
-        ],
+        type: 'asset/resource',
+        generator: {
+          filename: 'static/[hash].[ext]',
+        },
       },
     ],
   },
@@ -76,19 +66,24 @@ module.exports = {
     new webpack.DefinePlugin({
       'process.env': {
         NODE_ENV: JSON.stringify('production'), // eslint-disable-line quote-props
+        GOALERT_VERSION: JSON.stringify(env.GOALERT_VERSION), // eslint-disable-line quote-props
       },
     }),
-    // Auto generate index.html
-    new HtmlWebpackPlugin({
-      // custom favicon
-      favicon: 'app/public/favicon.ico',
-      template: TEMPLATE,
-      // JS placed at the bottom of the body element
-      inject: 'body',
-      // Use html-minifier
-      minify: {
-        collapseWhitespace: true,
-      },
+    new CopyPlugin({
+      patterns: [
+        'favicon-16.png',
+        'favicon-32.png',
+        'favicon-64.png',
+        'favicon-192.png',
+        'goalert-alt-logo.png',
+      ].map((filename) => ({
+        from: path.resolve(APP, `./public/${filename}`),
+        to: path.resolve(BUILD, `./static/${filename}`),
+      })),
+    }),
+    new webpack.BannerPlugin({
+      banner: `var GOALERT_VERSION=${JSON.stringify(env.GOALERT_VERSION)};`,
+      raw: true,
     }),
   ],
 
@@ -102,4 +97,4 @@ module.exports = {
     // minify javascript
     minimize: true,
   },
-}
+})

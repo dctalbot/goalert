@@ -1,9 +1,9 @@
 import React, { useState } from 'react'
+import { gql } from '@apollo/client'
 import p from 'prop-types'
 import Grid from '@material-ui/core/Grid'
 import Card from '@material-ui/core/Card'
 import CardContent from '@material-ui/core/CardContent'
-import gql from 'graphql-tag'
 import CreateFAB from '../lists/CreateFAB'
 import FlatList from '../lists/FlatList'
 import Query from '../util/Query'
@@ -19,7 +19,6 @@ import CopyText from '../util/CopyText'
 const HEARTBEAT_MONITOR_DESCRIPTION =
   'Heartbeat monitors create an alert if no heartbeat is received (a POST request) before the configured timeout.'
 
-const refetchQueries = ['monitorQuery', 'serviceDetailsQuery']
 const query = gql`
   query monitorQuery($serviceID: ID!) {
     service(id: $serviceID) {
@@ -65,7 +64,7 @@ export default function HeartbeatMonitorList(props) {
     const items = (monitors || [])
       .slice()
       .sort(sortItems)
-      .map(monitor => ({
+      .map((monitor) => ({
         icon: (
           <HeartbeatMonitorStatus
             lastState={monitor.lastState}
@@ -79,7 +78,7 @@ export default function HeartbeatMonitorList(props) {
               monitor.timeoutMinutes > 1 ? 's' : ''
             }`}
             <br />
-            <CopyText title='Copy URL' value={monitor.href} />
+            <CopyText title='Copy URL' value={monitor.href} asURL />
           </React.Fragment>
         ),
         secondaryAction: (
@@ -128,21 +127,18 @@ export default function HeartbeatMonitorList(props) {
       {showCreateDialog && (
         <HeartbeatMonitorCreateDialog
           serviceID={props.serviceID}
-          refetchQueries={refetchQueries}
           onClose={() => setShowCreateDialog(false)}
         />
       )}
       {showEditDialogByID && (
         <HeartbeatMonitorEditDialog
           monitorID={showEditDialogByID}
-          refetchQueries={refetchQueries}
           onClose={() => setShowEditDialogByID(null)}
         />
       )}
       {showDeleteDialogByID && (
         <HeartbeatMonitorDeleteDialog
           monitorID={showDeleteDialogByID}
-          refetchQueries={refetchQueries}
           onClose={() => setShowDeleteDialogByID(null)}
         />
       )}

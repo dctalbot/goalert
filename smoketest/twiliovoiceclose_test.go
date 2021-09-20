@@ -1,9 +1,10 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestTwilioVoiceClose checks that a voice call close is processed.
@@ -21,7 +22,7 @@ func TestTwilioVoiceClose(t *testing.T) {
 	insert into user_notification_rules (user_id, contact_method_id, delay_minutes) 
 	values
 		({{uuid "user"}}, {{uuid "cm1"}}, 0),
-		({{uuid "user"}}, {{uuid "cm1"}}, 1);
+		({{uuid "user"}}, {{uuid "cm1"}}, 30);
 
 	insert into escalation_policies (id, name) 
 	values
@@ -45,14 +46,13 @@ func TestTwilioVoiceClose(t *testing.T) {
 	h := harness.NewHarness(t, sql, "ids-to-uuids")
 	defer h.Close()
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 
-	d1.ExpectVoice("testing").ThenPress("6").ThenExpect("closed")
-	tw.WaitAndAssert()
+	d1.ExpectVoice("testing").
+		ThenPress("6").
+		ThenExpect("closed")
 
-	h.FastForward(time.Minute)
-
-	h.Delay(time.Second * 15)
+	h.FastForward(time.Hour)
 	// no more messages
 }

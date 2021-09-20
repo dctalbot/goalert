@@ -17,6 +17,7 @@ import (
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/retry"
 	"github.com/target/goalert/util/log"
+	"github.com/ttacon/libphonenumber"
 
 	"github.com/pkg/errors"
 )
@@ -25,18 +26,23 @@ var (
 	lastReplyRx  = regexp.MustCompile(`^'?\s*(c|close|a|ack[a-z]*)\s*'?$`)
 	shortReplyRx = regexp.MustCompile(`^'?\s*([0-9]+)\s*(c|a)\s*'?$`)
 	alertReplyRx = regexp.MustCompile(`^'?\s*(c|close|a|ack[a-z]*)\s*#?\s*([0-9]+)\s*'?$`)
+
+	svcReplyRx = regexp.MustCompile(`^'?\s*([0-9]+)\s*(cc|aa)\s*'?$`)
 )
 
 // SMS implements a notification.Sender for Twilio SMS.
 type SMS struct {
 	b *dbSMS
 	c *Config
+	r notification.Receiver
 
-	respCh chan *notification.MessageResponse
-	statCh chan *notification.MessageStatus
-
-	ban *dbBan
+	limit *replyLimiter
 }
+
+var _ notification.ReceiverSetter = &SMS{}
+var _ notification.Sender = &SMS{}
+var _ notification.StatusChecker = &SMS{}
+var _ notification.FriendlyValuer = &SMS{}
 
 // NewSMS performs operations like validating essential parameters, registering the Twilio client and db
 // and adding routes for successful and unsuccessful message delivery to Twilio
@@ -47,36 +53,30 @@ func NewSMS(ctx context.Context, db *sql.DB, c *Config) (*SMS, error) {
 	}
 
 	s := &SMS{
-		b:      b,
-		c:      c,
-		respCh: make(chan *notification.MessageResponse),
-		statCh: make(chan *notification.MessageStatus, 10),
-	}
-	s.ban, err = newBanDB(ctx, db, c, "twilio_sms_errors")
-	if err != nil {
-		return nil, errors.Wrap(err, "init Twilio SMS DB")
+		b: b,
+		c: c,
+
+		limit: newReplyLimiter(),
 	}
 
 	return s, nil
 }
 
+// SetReceiver sets the notification.Receiver for incoming messages and status updates.
+func (s *SMS) SetReceiver(r notification.Receiver) { s.r = r }
+
 // Status provides the current status of a message.
-func (s *SMS) Status(ctx context.Context, id, providerID string) (*notification.MessageStatus, error) {
-	msg, err := s.c.GetSMS(ctx, providerID)
+func (s *SMS) Status(ctx context.Context, externalID string) (*notification.Status, error) {
+	msg, err := s.c.GetSMS(ctx, externalID)
 	if err != nil {
 		return nil, err
 	}
-	return msg.messageStatus(id), nil
+
+	return msg.messageStatus(), nil
 }
 
-// ListenStatus will return a channel that is fed async status updates.
-func (s *SMS) ListenStatus() <-chan *notification.MessageStatus { return s.statCh }
-
-// ListenResponse will return a channel that is fed async message responses.
-func (s *SMS) ListenResponse() <-chan *notification.MessageResponse { return s.respCh }
-
 // Send implements the notification.Sender interface.
-func (s *SMS) Send(ctx context.Context, msg notification.Message) (*notification.MessageStatus, error) {
+func (s *SMS) Send(ctx context.Context, msg notification.Message) (*notification.SentMessage, error) {
 	cfg := config.FromContext(ctx)
 	if !cfg.Twilio.Enable {
 		return nil, errors.New("Twilio provider is disabled")
@@ -94,42 +94,59 @@ func (s *SMS) Send(ctx context.Context, msg notification.Message) (*notification
 		"Type":  "TwilioSMS",
 	})
 
-	b, err := s.ban.IsBanned(ctx, destNumber, true)
-	if err != nil {
-		return nil, errors.Wrap(err, "check ban status")
-	}
-	if b {
-		return nil, errors.New("number had too many outgoing errors recently")
-	}
-
-	var message string
-	switch msg.Type() {
-	case notification.MessageTypeAlertStatus:
-		message, err = alertSMS{
-			ID:   msg.SubjectID(),
-			Body: msg.Body(),
-		}.Render()
-	case notification.MessageTypeAlert:
+	makeSMSCode := func(alertID int, serviceID string) int {
 		var code int
-		if hasTwoWaySMSSupport(destNumber) {
-			code, err = s.b.insertDB(ctx, destNumber, msg.ID(), msg.SubjectID())
+		var err error
+		if hasTwoWaySMSSupport(ctx, destNumber) {
+			code, err = s.b.insertDB(ctx, destNumber, msg.ID(), alertID, serviceID)
 			if err != nil {
 				log.Log(ctx, errors.Wrap(err, "insert alert id for SMS callback -- sending 1-way SMS as fallback"))
 			}
 		}
+		return code
+	}
+
+	prefix := cfg.ApplicationName() + ": "
+	maxLen := maxGSMLen - len(prefix)
+
+	var message string
+	var err error
+	switch t := msg.(type) {
+	case notification.AlertStatus:
+		message, err = alertSMS{
+			ID:   t.AlertID,
+			Body: t.LogEntry,
+		}.Render(maxLen)
+	case notification.AlertBundle:
+		var link string
+		if !cfg.General.DisableSMSLinks {
+			link = cfg.CallbackURL(fmt.Sprintf("/services/%s/alerts", t.ServiceID))
+		}
 
 		message, err = alertSMS{
-			ID:   msg.SubjectID(),
-			Body: msg.Body(),
-			Code: code,
-			Link: cfg.CallbackURL("/alerts/" + strconv.Itoa(msg.SubjectID())),
-		}.Render()
-	case notification.MessageTypeTest:
-		message = fmt.Sprintf("This is a test message from GoAlert.")
-	case notification.MessageTypeVerification:
-		message = fmt.Sprintf("GoAlert verification code: %d", msg.SubjectID())
+			Count: t.Count,
+			Body:  t.ServiceName,
+			Link:  link,
+			Code:  makeSMSCode(0, t.ServiceID),
+		}.Render(maxLen)
+	case notification.Alert:
+		var link string
+		if !cfg.General.DisableSMSLinks {
+			link = cfg.CallbackURL(fmt.Sprintf("/alerts/%d", t.AlertID))
+		}
+
+		message, err = alertSMS{
+			ID:   t.AlertID,
+			Body: t.Summary,
+			Link: link,
+			Code: makeSMSCode(t.AlertID, ""),
+		}.Render(maxLen)
+	case notification.Test:
+		message = "Test message."
+	case notification.Verification:
+		message = fmt.Sprintf("Verification code: %d", t.Code)
 	default:
-		return nil, errors.Errorf("unhandled message type %s", msg.Type().String())
+		return nil, errors.Errorf("unhandled message type %T", t)
 	}
 	if err != nil {
 		return nil, errors.Wrap(err, "render message")
@@ -141,12 +158,15 @@ func (s *SMS) Send(ctx context.Context, msg notification.Message) (*notification
 	}
 	opts.CallbackParams.Set(msgParamID, msg.ID())
 	// Actually send notification to end user & receive Message Status
-	resp, err := s.c.SendSMS(ctx, destNumber, message, opts)
+	resp, err := s.c.SendSMS(ctx, destNumber, prefix+message, opts)
 	if err != nil {
 		return nil, errors.Wrap(err, "send message")
 	}
 
-	return resp.messageStatus(msg.ID()), nil
+	// If the message was sent successfully, reset reply limits.
+	s.limit.Reset(destNumber)
+
+	return resp.sentMessage(), nil
 }
 
 func (s *SMS) ServeStatusCallback(w http.ResponseWriter, req *http.Request) {
@@ -172,18 +192,42 @@ func (s *SMS) ServeStatusCallback(w http.ResponseWriter, req *http.Request) {
 
 	log.Debugf(ctx, "Got Twilio SMS status callback.")
 
-	s.statCh <- msg.messageStatus(req.URL.Query().Get(msgParamID))
-
-	if status != MessageStatusFailed {
-		// ignore other types
-		return
-	}
-
-	err := s.ban.RecordError(context.Background(), number, true, "send failed")
+	err := s.r.SetMessageStatus(ctx, sid, msg.messageStatus())
 	if err != nil {
-		log.Log(ctx, errors.Wrap(err, "record error"))
+		// log and continue
+		log.Log(ctx, err)
+	}
+}
+
+// isStopMessage checks the body of the message against single-word matches
+// i.e. "stop" will unsubscribe, however "please stop" will not.
+func isStopMessage(body string) bool {
+	switch strings.ToLower(body) {
+	case "stop", "stopall", "unsubscribe", "cancel", "end", "quit":
+		return true
 	}
 
+	return false
+}
+
+// isStartMessage checks the body of the message against single-word matches
+// i.e. "start" will resubscribe, however "please start" will not.
+func isStartMessage(body string) bool {
+	switch strings.ToLower(body) {
+	case "start", "yes", "unstop":
+		return true
+	}
+
+	return false
+}
+
+// FriendlyValue will return the international formatting of the phone number.
+func (s *SMS) FriendlyValue(ctx context.Context, value string) (string, error) {
+	num, err := libphonenumber.Parse(value, "")
+	if err != nil {
+		return "", fmt.Errorf("parse number for formatting: %w", err)
+	}
+	return libphonenumber.Format(num, libphonenumber.INTERNATIONAL), nil
 }
 
 func (s *SMS) ServeMessage(w http.ResponseWriter, req *http.Request) {
@@ -203,74 +247,75 @@ func (s *SMS) ServeMessage(w http.ResponseWriter, req *http.Request) {
 		"Type":   "TwilioSMS",
 	})
 
-	respond := func(errMsg string, msg string) {
-		if errMsg != "" {
-			err := s.ban.RecordError(context.Background(), from, false, errMsg)
-			if err != nil {
-				log.Log(ctx, errors.Wrap(err, "record error"))
-			}
+	respond := func(isPassive bool, msg string) {
+		if !isPassive {
+			// always reset if an action was taken
+			s.limit.Reset(from)
 		}
-		_, err := s.c.SendSMS(ctx, from, msg, nil)
+
+		if s.limit.ShouldDrop(from) {
+			log.Debugf(ctx, "SMS passive reply limit reached for %s, not replying.", from)
+			return
+		}
+
+		if isPassive {
+			valid, err := s.r.IsKnownDest(ctx, from)
+			if err != nil {
+				log.Log(ctx, fmt.Errorf("check if known SMS number: %w", err))
+			} else if !valid {
+				// don't respond if the number is not known
+				return
+			}
+			s.limit.RecordPassiveReply(from)
+		}
+
+		_, err := s.c.SendSMS(ctx, from, msg, &SMSOptions{FromNumber: req.FormValue("to")})
 		if err != nil {
 			log.Log(ctx, errors.Wrap(err, "send response"))
 		}
-		// TODO: we should track & queue these
-		// (maybe the engine should generate responses instead)
 	}
-	var banned bool
 	var err error
-	err = retry.DoTemporaryError(func(int) error {
-		banned, err = s.ban.IsBanned(ctx, from, false)
-		return errors.Wrap(err, "look up ban status")
-	},
+	retryOpts := []retry.Option{
 		retry.Log(ctx),
 		retry.Limit(10),
 		retry.FibBackoff(time.Second),
-	)
-	if err != nil {
-		log.Log(ctx, err)
-		respond("", "System error. Visit the dashboard to manage alerts.")
+	}
+
+	// handle start and stop codes from user
+	body := req.FormValue("Body")
+	dest := notification.Dest{Type: notification.DestTypeSMS, Value: from}
+	if isStartMessage(body) {
+		err := retry.DoTemporaryError(func(int) error { return s.r.Start(ctx, dest) }, retryOpts...)
+		if err != nil {
+			log.Log(ctx, fmt.Errorf("process START message: %w", err))
+		}
 		return
 	}
-	if banned {
-		http.Error(w, "", http.StatusTooManyRequests)
+	if isStopMessage(body) {
+		err := retry.DoTemporaryError(func(int) error { return s.r.Stop(ctx, dest) }, retryOpts...)
+		if err != nil {
+			log.Log(ctx, fmt.Errorf("process STOP message: %w", err))
+		}
 		return
 	}
 
-	body := req.FormValue("Body")
-	if strings.Contains(strings.ToLower(body), "stop") {
-		err := retry.DoTemporaryError(func(int) error {
-			errCh := make(chan error, 1)
-			s.respCh <- &notification.MessageResponse{
-				Ctx:    ctx,
-				From:   notification.Dest{Type: notification.DestTypeSMS, Value: from},
-				Result: notification.ResultStop,
-				Err:    errCh,
-			}
-			return errors.Wrap(<-errCh, "process STOP message")
-		},
-			retry.Log(ctx),
-			retry.Limit(10),
-			retry.FibBackoff(time.Second),
-		)
-		if err != nil {
-			log.Log(ctx, err)
-		}
+	if cfg.Twilio.DisableTwoWaySMS {
+		respond(true, "Response codes are currently disabled. Visit the dashboard to manage alerts.")
 		return
 	}
 
 	body = strings.TrimSpace(body)
 	body = strings.ToLower(body)
-	var lookupFn func() (string, int, error)
+	var lookupFn func() (*codeInfo, error)
 	var result notification.Result
-
+	var isSvc bool
 	if m := lastReplyRx.FindStringSubmatch(body); len(m) == 2 {
 		if strings.HasPrefix(m[1], "a") {
 			result = notification.ResultAcknowledge
 		} else {
 			result = notification.ResultResolve
 		}
-		lookupFn = func() (string, int, error) { return s.b.LookupByCode(ctx, from, 0) }
+		lookupFn = func() (*codeInfo, error) { return s.b.LookupByCode(ctx, from, 0) }
 	} else if m := shortReplyRx.FindStringSubmatch(body); len(m) == 3 {
 		if strings.HasPrefix(m[2], "a") {
 			result = notification.ResultAcknowledge
@@ -282,7 +327,7 @@ func (s *SMS) ServeMessage(w http.ResponseWriter, req *http.Request) {
 			log.Debug(ctx, errors.Wrap(err, "parse code"))
 		} else {
 			ctx = log.WithField(ctx, "Code", code)
-			lookupFn = func() (string, int, error) { return s.b.LookupByCode(ctx, from, code) }
+			lookupFn = func() (*codeInfo, error) { return s.b.LookupByCode(ctx, from, code) }
 		}
 	} else if m := alertReplyRx.FindStringSubmatch(body); len(m) == 3 {
 		if strings.HasPrefix(m[1], "a") {
@@ -295,12 +340,26 @@ func (s *SMS) ServeMessage(w http.ResponseWriter, req *http.Request) {
 			log.Debug(ctx, errors.Wrap(err, "parse alertID"))
 		} else {
 			ctx = log.WithField(ctx, "AlertID", alertID)
-			lookupFn = func() (string, int, error) { return s.b.LookupByAlertID(ctx, from, alertID) }
+			lookupFn = func() (*codeInfo, error) { return s.b.LookupByAlertID(ctx, from, alertID) }
+		}
+	} else if m := svcReplyRx.FindStringSubmatch(body); len(m) == 3 {
+		isSvc = true
+		if strings.HasPrefix(m[2], "a") {
+			result = notification.ResultAcknowledge
+		} else {
+			result = notification.ResultResolve
+		}
+		code, err := strconv.Atoi(m[1])
+		if err != nil {
+			log.Debug(ctx, errors.Wrap(err, "parse code"))
+		} else {
+			ctx = log.WithField(ctx, "Code", code)
+			lookupFn = func() (*codeInfo, error) { return s.b.LookupSvcByCode(ctx, from, code) }
 		}
 	}
 
 	if lookupFn == nil {
-		respond("unknown action", "Sorry, but that isn't a request GoAlert understood. Visit the Web UI for more information. To unsubscribe, reply with STOP.")
+		respond(true, "Sorry, but that isn't a request GoAlert understood. Visit the Web UI for more information. To unsubscribe, reply with STOP.")
 		ctx = log.WithField(ctx, "SMSBody", body)
 		log.Debug(ctx, errors.Wrap(err, "parse alert action"))
 		return
@@ -314,49 +373,38 @@ func (s *SMS) ServeMessage(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var nonSystemErr bool
-
-	var alertID int
+	var info *codeInfo
 	err = retry.DoTemporaryError(func(int) error {
-		callbackID, aID, err := lookupFn()
+		info, err = lookupFn()
 		if err != nil {
-			return errors.Wrap(err, "lookup callbackID")
+			return errors.Wrap(err, "lookup code")
 		}
-		alertID = aID
 
-		errCh := make(chan error, 1)
-		s.respCh <- &notification.MessageResponse{
-			Ctx:    ctx,
-			ID:     callbackID,
-			From:   notification.Dest{Type: notification.DestTypeSMS, Value: from},
-			Result: result,
-			Err:    errCh,
+		err = s.r.Receive(ctx, info.CallbackID, result)
+		if err != nil {
+			return fmt.Errorf("process notification response: %w", err)
 		}
-		return errors.Wrap(<-errCh, "process notification response")
-	},
-		retry.Log(ctx),
-		retry.Limit(10),
-		retry.FibBackoff(time.Second),
-	)
-	ctx = log.WithField(ctx, "AlertID", alertID)
+		return nil
+	}, retryOpts...)
 
-	if errors.Cause(err) == sql.ErrNoRows {
-		respond("unknown callbackID", "Unknown alert code for this number. Visit the dashboard to manage alerts.")
+	if errors.Is(err, sql.ErrNoRows) || (isSvc && info.ServiceName == "") || (!isSvc && info.AlertID == 0) {
+		respond(true, "Unknown reply code for this action. Visit the dashboard to manage alerts.")
 		return
 	}
 
 	msg := "System error. Visit the dashboard to manage alerts."
 	if alert.IsAlreadyClosed(err) {
 		nonSystemErr = true
-		msg = fmt.Sprintf("Alert #%d already closed", alertID)
+		msg = fmt.Sprintf("Alert #%d already closed", alert.AlertID(err))
 	} else if alert.IsAlreadyAcknowledged(err) {
 		nonSystemErr = true
-		msg = fmt.Sprintf("Alert #%d already acknowledged", alertID)
+		msg = fmt.Sprintf("Alert #%d already acknowledged", alert.AlertID(err))
 	}
 
 	if nonSystemErr {
+		var e alert.LogEntryFetcher
 		// alert store returns the special error struct, twilio checks if it's special, and if so, pulls the log entry
-		if e, ok := errors.Cause(err).(alert.LogEntryFetcher); ok {
-			err = nil
+		if errors.As(err, &e) {
 			// we pass a 'sudo' context to give permission
 			permission.SudoContext(ctx, func(sCtx context.Context) {
 				entry, err := e.LogEntry(sCtx)
@@ -366,17 +414,22 @@ func (s *SMS) ServeMessage(w http.ResponseWriter, req *http.Request) {
 					msg += "\n\n" + entry.String()
 				}
 			})
+		} else {
+			log.Log(ctx, errors.Wrap(err, "process notification response"))
 		}
-		log.Log(ctx, errors.Wrap(err, "process notification response"))
-		respond("", msg)
+		respond(true, msg)
 		return
 	}
 
 	if err != nil {
 		log.Log(ctx, err)
-		respond("", msg)
+		respond(true, msg)
 		return
 	}
 
-	respond("", fmt.Sprintf("%s alert #%d", prefix, alertID))
+	if info.ServiceName != "" {
+		respond(false, fmt.Sprintf("%s all alerts for service '%s'", prefix, info.ServiceName))
+	} else {
+		respond(false, fmt.Sprintf("%s alert #%d", prefix, info.AlertID))
+	}
 }

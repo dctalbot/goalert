@@ -11,11 +11,13 @@ import (
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/migrate"
 	"github.com/target/goalert/util/sqlutil"
+	"github.com/target/goalert/util/timeutil"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 )
 
 var (
@@ -28,6 +30,7 @@ func main() {
 	seedVal := flag.Int64("seed", 1, "Change the random seed used to generate data.")
 	genData := flag.Bool("with-rand-data", false, "Repopulates the DB with random data.")
 	skipMigrate := flag.Bool("no-migrate", false, "Disables UP migration.")
+	skipDrop := flag.Bool("skip-drop", false, "Skip database drop/create step.")
 	adminURL := flag.String("admin-db-url", "postgres://goalert@localhost/postgres", "Admin DB URL to use (used to recreate DB).")
 	dbURL := flag.String("db-url", "postgres://goalert@localhost", "DB URL to use.")
 	flag.Parse()
@@ -46,9 +49,11 @@ func main() {
 		dbName = cfg.User
 	}
 
-	err = recreateDB(ctx, *adminURL, dbName)
-	if err != nil {
-		log.Fatal("recreate DB:", err)
+	if !*skipDrop {
+		err = recreateDB(ctx, *adminURL, dbName)
+		if err != nil {
+			log.Fatal("recreate DB:", err)
+		}
 	}
 
 	if *skipMigrate {
@@ -98,10 +103,12 @@ func fillDB(ctx context.Context, url string) error {
 			log.Fatal(err)
 		}
 	}
-	asUUID := func(id string) (res [16]byte) {
-		copy(res[:], uuid.FromStringOrNil(id).Bytes())
-		return res
+	asTime := func(c timeutil.Clock) (t pgtype.Time) {
+		t.Status = pgtype.Present
+		t.Microseconds = time.Duration(c).Microseconds()
+		return t
 	}
+	asUUID := func(id string) [16]byte { return uuid.MustParse(id) }
 	asUUIDPtr := func(id string) *[16]byte {
 		if id == "" {
 			return nil
@@ -171,8 +178,8 @@ func fillDB(ctx context.Context, url string) error {
 				asUUID(r.ID),
 				asUUID(r.ScheduleID),
 				r.Day(0), r.Day(1), r.Day(2), r.Day(3), r.Day(4), r.Day(5), r.Day(6),
-				pgTime(r.Start),
-				pgTime(r.End),
+				asTime(r.Start),
+				asTime(r.End),
 				usr,
 				rot,
 			}
@@ -249,7 +256,7 @@ func fillDB(ctx context.Context, url string) error {
 			rot = &id
 		}
 		return []interface{}{asUUID(fav.UserID), svc, sched, rot}
-	})
+	}, "users", "services", "schedules", "rotations", "escalation_policies")
 
 	_, err = pool.Exec(ctx, "alter table alerts disable trigger trg_enforce_alert_limit")
 	must(err)

@@ -1,27 +1,34 @@
-import gql from 'graphql-tag'
+import { gql } from '@apollo/client'
 import { makeQuerySelect } from './QuerySelect'
 
 const query = gql`
-  query($input: EscalationPolicySearchOptions) {
+  query ($input: EscalationPolicySearchOptions) {
     escalationPolicies(input: $input) {
       nodes {
         id
         name
+        isFavorite
       }
     }
   }
 `
 
 const valueQuery = gql`
-  query($id: ID!) {
+  query ($id: ID!) {
     escalationPolicy(id: $id) {
       id
       name
+      isFavorite
     }
   }
 `
 
 export const EscalationPolicySelect = makeQuerySelect(
   'EscalationPolicySelect',
-  { query, valueQuery },
+  {
+    variables: { favoritesFirst: true },
+    defaultQueryVariables: { favoritesFirst: true },
+    query,
+    valueQuery,
+  },
 )

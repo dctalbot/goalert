@@ -1,4 +1,4 @@
-const quoteRx = s => (s || '').replace(/[.?*+^$[\]\\(){}|-]/g, '\\$&')
+const quoteRx = (s) => (s || '').replace(/[.?*+^$[\]\\(){}|-]/g, '\\$&')
 
 export function getParameterByName(name, url = global.location.href) {
   name = name.replace(/[[\]]/g, '\\$&')
@@ -15,7 +15,7 @@ export function getAllParameters(url = global.location.href) {
   // match and select any parameters in the url
   const rx = /[?&](\w+)=(?:([^&#]*)|&|#|$)/
 
-  let queries = {}
+  const queries = {}
   // find the first match
   let m = rx.exec(url)
   while (m) {
@@ -28,26 +28,20 @@ export function getAllParameters(url = global.location.href) {
   return queries
 }
 
-// clears the parameter given from the current url
-export function clearParameter(name, url = global.location.href) {
-  let query = setParameterByName(name, null, url)
-  return query
-}
-
 // takes in a var name, var value, and optionally a url to read previous params from.
 // returns a string of the params and the maintained hash (DOES NOT RETURN THE PATH)
 export function setParameterByName(name, value, url = global.location.href) {
   // fetch all current url queries
-  let queries = getAllParameters(url)
+  const queries = getAllParameters(url)
 
   // set new value
   queries[name] = encodeURIComponent(value)
 
   // rebuild the url -- omit the parameter `name` if value is null
-  let queryList = Object.keys(queries)
+  const queryList = Object.keys(queries)
     .sort((a, b) => (a < b ? -1 : 1))
-    .filter(i => !(value === null && i === name))
-    .map(query => {
+    .filter((i) => !(value === null && i === name))
+    .map((query) => {
       return query + '=' + queries[query]
     })
 
@@ -59,4 +53,10 @@ export function setParameterByName(name, value, url = global.location.href) {
   const newURL = '?' + queryList.join('&') + hash
 
   return newURL
+}
+
+// clears the parameter given from the current url
+export function clearParameter(name, url = global.location.href) {
+  const query = setParameterByName(name, null, url)
+  return query
 }

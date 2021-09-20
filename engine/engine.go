@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/target/goalert/alert"
 	"github.com/target/goalert/app/lifecycle"
 	"github.com/target/goalert/engine/cleanupmanager"
@@ -21,15 +22,10 @@ import (
 	"github.com/target/goalert/notification"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/user"
-	"github.com/target/goalert/user/contactmethod"
 	"github.com/target/goalert/util/log"
 	"github.com/target/goalert/util/sqlutil"
-
-	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 )
-
-var errDisabledCM = errors.New("contact method is disabled")
 
 type updater interface {
 	Name() string
@@ -46,7 +42,7 @@ type Engine struct {
 	mgr *lifecycle.Manager
 
 	shutdownCh  chan struct{}
-	triggerCh   chan struct{}
+	triggerCh   chan chan struct{}
 	runLoopExit chan struct{}
 
 	nextCycle chan chan struct{}
@@ -59,6 +55,8 @@ type Engine struct {
 
 	triggerPauseCh chan *pauseReq
 }
+
+var _ notification.ResultReceiver = &Engine{}
 
 type pauseReq struct {
 	ch  chan error
@@ -75,7 +73,7 @@ func NewEngine(ctx context.Context, db *sql.DB, c *Config) (*Engine, error) {
 	p := &Engine{
 		cfg:            c,
 		shutdownCh:     make(chan struct{}),
-		triggerCh:      make(chan struct{}),
+		triggerCh:      make(chan chan struct{}),
 		triggerPauseCh: make(chan *pauseReq),
 		runLoopExit:    make(chan struct{}),
 		nextCycle:      make(chan chan struct{}),
@@ -104,7 +102,7 @@ func NewEngine(ctx context.Context, db *sql.DB, c *Config) (*Engine, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "alert escalation backend")
 	}
-	ncMgr, err := npcyclemanager.NewDB(ctx, db)
+	ncMgr, err := npcyclemanager.NewDB(ctx, db, c.AlertLogStore)
 	if err != nil {
 		return nil, errors.Wrap(err, "notification cycle backend")
 	}
@@ -136,14 +134,7 @@ func NewEngine(ctx context.Context, db *sql.DB, c *Config) (*Engine, error) {
 		cleanMgr,
 	}
 
-	p.msg, err = message.NewDB(ctx, db, &message.Config{
-		MaxMessagesPerCycle: c.MaxMessages,
-		RateLimit: map[notification.DestType]*message.RateConfig{
-			notification.DestTypeSMS:   &message.RateConfig{PerSecond: 1, Batch: 5 * time.Second},
-			notification.DestTypeVoice: &message.RateConfig{PerSecond: 1, Batch: 5 * time.Second},
-		},
-		Pausable: p.mgr,
-	})
+	p.msg, err = message.NewDB(ctx, db, c.AlertLogStore, p.mgr)
 	if err != nil {
 		return nil, errors.Wrap(err, "messaging backend")
 	}
@@ -186,7 +177,7 @@ func (p *Engine) processModule(ctx context.Context, m updater) {
 			// https://www.postgresql.org/docs/9.6/static/errcodes-appendix.html
 			continue
 		}
-		if err != nil && errors.Cause(err) != processinglock.ErrNoLock {
+		if err != nil && !errors.Is(err, processinglock.ErrNoLock) {
 			log.Log(ctx, errors.Wrap(err, m.Name()))
 		}
 		break
@@ -200,25 +191,11 @@ func (p *Engine) processMessages(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 
-	err := p.msg.SendMessages(ctx, func(ctx context.Context, m *message.Message) (*notification.MessageStatus, error) {
-		switch m.Type {
-		case message.TypeAlertNotification:
-			return p.sendNotification(ctx, m.ID, m.AlertID, m.DestType, m.DestID)
-		case message.TypeAlertStatusUpdate:
-			return p.sendStatusUpdate(ctx, m.ID, m.AlertLogID, m.DestType, m.DestID)
-		case message.TypeTestNotification:
-			return p.sendTestNotification(ctx, m.ID, m.DestType, m.DestID)
-		case message.TypeVerificationMessage:
-			return p.sendVerificationMessage(ctx, m.ID, m.DestType, m.DestID, m.VerifyID)
-		}
-
-		log.Log(ctx, errors.New("SEND NOT IMPLEMENTED FOR MESSAGE TYPE"))
-		return &notification.MessageStatus{State: notification.MessageStateFailedPerm}, nil
-	}, p.cfg.NotificationSender.Status)
-	if errors.Cause(err) == processinglock.ErrNoLock {
+	err := p.msg.SendMessages(ctx, p.sendMessage, p.cfg.NotificationManager.MessageStatus)
+	if errors.Is(err, processinglock.ErrNoLock) {
 		return
 	}
-	if errors.Cause(err) == message.ErrAbort {
+	if errors.Is(err, message.ErrAbort) {
 		return
 	}
 	if err != nil {
@@ -242,6 +219,25 @@ func recoverPanic(ctx context.Context, name string) {
 // Trigger will force notifications to be processed immediately.
 func (p *Engine) Trigger() {
 	<-p.triggerCh
+}
+
+// TriggerAndWaitNextCycle will force notifications to be processed immediately
+// and will return after the next engine cycle starts and then finishes.
+func (p *Engine) TriggerAndWaitNextCycle(ctx context.Context) error {
+	var waitCh chan struct{}
+	select {
+	case waitCh = <-p.triggerCh: // cause new trigger
+	case waitCh = <-p.nextCycle: // cycle started for some other reason
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case <-waitCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Pause will attempt to gracefully stop engine processing.
@@ -301,11 +297,11 @@ func (p *Engine) _shutdown(ctx context.Context) error {
 	return nil
 }
 
-// UpdateStatus will update the status of a message.
-func (p *Engine) UpdateStatus(ctx context.Context, status *notification.MessageStatus) error {
+// SetSendResult will update the status of a message.
+func (p *Engine) SetSendResult(ctx context.Context, res *notification.SendResult) error {
 	var err error
 	permission.SudoContext(ctx, func(ctx context.Context) {
-		err = p.msg.UpdateMessageStatus(ctx, status)
+		err = p.msg.UpdateMessageStatus(ctx, res)
 	})
 	return err
 }
@@ -317,6 +313,12 @@ func (p *Engine) Receive(ctx context.Context, callbackID string, result notifica
 	cb, err := p.b.FindOne(ctx, callbackID)
 	if err != nil {
 		return err
+	}
+	if cb.ServiceID != "" {
+		ctx = log.WithField(ctx, "ServiceID", cb.ServiceID)
+	}
+	if cb.AlertID != 0 {
+		ctx = log.WithField(ctx, "AlertID", cb.AlertID)
 	}
 
 	var usr *user.User
@@ -339,26 +341,51 @@ func (p *Engine) Receive(ctx context.Context, callbackID string, result notifica
 		ID:   callbackID,
 	})
 
+	var newStatus alert.Status
 	switch result {
 	case notification.ResultAcknowledge:
-		return p.am.UpdateStatus(ctx, cb.AlertID, alert.StatusActive)
+		newStatus = alert.StatusActive
 	case notification.ResultResolve:
-		return p.am.UpdateStatus(ctx, cb.AlertID, alert.StatusClosed)
+		newStatus = alert.StatusClosed
+	default:
+		return errors.New("unknown result type")
 	}
 
-	return errors.New("unknown result")
+	if cb.AlertID != 0 {
+		return errors.Wrap(p.am.UpdateStatus(ctx, cb.AlertID, newStatus), "update alert")
+	}
+	if cb.ServiceID != "" {
+		return errors.Wrap(p.am.UpdateStatusByService(ctx, cb.ServiceID, newStatus), "update all alerts")
+	}
+
+	return errors.New("unknown callback type")
 }
 
-// Stop will disable all associated contact methods associated with `value` of type `t`. This is should
+// Start will enable all associated contact methods of `value` with type `t`. This should
+// be invoked if a user, for example, responds with `START` via sms.
+func (p *Engine) Start(ctx context.Context, d notification.Dest) error {
+	if !d.Type.IsUserCM() {
+		return errors.New("START only supported on user contact methods")
+	}
+
+	var err error
+	permission.SudoContext(ctx, func(ctx context.Context) {
+		err = p.cfg.ContactMethodStore.EnableByValue(ctx, d.Type.CMType(), d.Value)
+	})
+
+	return err
+}
+
+// Stop will disable all associated contact methods of `value` with type `t`. This should
 // be invoked if a user, for example, responds with `STOP` via SMS.
 func (p *Engine) Stop(ctx context.Context, d notification.Dest) error {
 	if !d.Type.IsUserCM() {
-		return errors.New("stop only supported on user contact methods")
+		return errors.New("STOP only supported on user contact methods")
 	}
-	var err error
 
+	var err error
 	permission.SudoContext(ctx, func(ctx context.Context) {
-		err = p.cfg.ContactMethodStore.DisableByValue(ctx, contactmethod.TypeFromDestType(d.Type), d.Value)
+		err = p.cfg.ContactMethodStore.DisableByValue(ctx, d.Type.CMType(), d.Value)
 	})
 
 	return err
@@ -370,7 +397,9 @@ func (p *Engine) processAll(ctx context.Context) bool {
 			return true
 		}
 		ctx, sp := trace.StartSpan(ctx, m.Name())
+		start := time.Now()
 		p.processModule(ctx, m)
+		metricModuleDuration.WithLabelValues(m.Name()).Observe(time.Since(start).Seconds())
 		sp.End()
 	}
 	return false
@@ -401,13 +430,18 @@ passSignals:
 	log.Logf(ctx, "Engine cycle start.")
 	defer log.Logf(ctx, "Engine cycle end.")
 
+	startAll := time.Now()
 	aborted := p.processAll(ctx)
 	if aborted || p.mgr.IsPausing() {
 		sp.Annotate([]trace.Attribute{trace.BoolAttribute("cycle.abort", true)}, "Cycle aborted.")
 		log.Logf(ctx, "Engine cycle aborted (paused or shutting down).")
 		return
 	}
+	startMsg := time.Now()
 	p.processMessages(ctx)
+	metricModuleDuration.WithLabelValues("Engine.Message").Observe(time.Since(startMsg).Seconds())
+	metricModuleDuration.WithLabelValues("Engine").Observe(time.Since(startAll).Seconds())
+	metricCycleTotal.Inc()
 }
 func (p *Engine) handlePause(ctx context.Context, respCh chan error) {
 	// nothing special to do currently
@@ -419,6 +453,8 @@ func (p *Engine) _run(ctx context.Context) error {
 	ctx = permission.SystemContext(ctx, "Engine")
 	if p.cfg.DisableCycle {
 		log.Logf(ctx, "Engine started in API-only mode.")
+		ch := make(chan struct{})
+		close(ch)
 		for {
 			select {
 			case req := <-p.triggerPauseCh:
@@ -427,7 +463,7 @@ func (p *Engine) _run(ctx context.Context) error {
 				return ctx.Err()
 			case <-p.shutdownCh:
 				return nil
-			case p.triggerCh <- struct{}{}:
+			case p.triggerCh <- ch:
 				log.Logf(ctx, "Ignoring engine trigger (API-only mode).")
 			}
 		}
@@ -456,11 +492,13 @@ func (p *Engine) _run(ctx context.Context) error {
 		default:
 		}
 
+		nextTrigger := make(chan struct{})
 		select {
 		case req := <-p.triggerPauseCh:
 			p.handlePause(req.ctx, req.ch)
-		case p.triggerCh <- struct{}{}:
+		case p.triggerCh <- nextTrigger:
 			p.cycle(log.WithField(ctx, "Trigger", "DIRECT"))
+			close(nextTrigger)
 		case <-alertTicker.C:
 			p.cycle(log.WithField(ctx, "Trigger", "INTERVAL"))
 		case <-ctx.Done():

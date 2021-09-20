@@ -31,6 +31,7 @@ func NewServer() *Server {
 	srv.mux.HandleFunc("/api/users.conversations", srv.ServeConversationsList) // same data
 	srv.mux.HandleFunc("/api/oauth.access", srv.ServeOAuthAccess)
 	srv.mux.HandleFunc("/api/auth.revoke", srv.ServeAuthRevoke)
+	srv.mux.HandleFunc("/api/auth.test", srv.ServeAuthTest)
 	srv.mux.HandleFunc("/api/channels.create", srv.ServeChannelsCreate)
 	srv.mux.HandleFunc("/api/groups.create", srv.ServeGroupsCreate)
 	// TODO: history, leave, join
@@ -195,6 +196,29 @@ func (st *state) Messages(chanID string) []Message {
 	}
 
 	return result
+}
+
+// DeleteMessage will delete a message from channel history.
+func (st *state) DeleteMessage(chanID, ts string) bool {
+	st.mx.Lock()
+	defer st.mx.Unlock()
+	ch := st.channels[chanID]
+	if ch == nil {
+		return false
+	}
+
+	var deleted bool
+	msgs := ch.Messages[:0]
+	for _, m := range ch.Messages {
+		if m.TS == ts {
+			deleted = true
+			continue
+		}
+		msgs = append(msgs, m)
+	}
+	ch.Messages = msgs
+
+	return deleted
 }
 
 // ServeHTTP serves the Slack API.

@@ -4,8 +4,9 @@ import MountWatcher from '../util/MountWatcher'
 import FormControl from '@material-ui/core/FormControl'
 import FormHelperText from '@material-ui/core/FormHelperText'
 import FormLabel from '@material-ui/core/FormLabel'
-import { get, isEmpty, startCase } from 'lodash-es'
-
+import { get, isEmpty, startCase } from 'lodash'
+import shrinkWorkaround from '../util/shrinkWorkaround'
+import AppLink from '../util/AppLink'
 import { FormContainerContext } from './context'
 
 export class FormField extends React.PureComponent {
@@ -24,12 +25,20 @@ export class FormField extends React.PureComponent {
     // Adjusts props for usage with a Checkbox component.
     checkbox: p.bool,
 
+    // Allows entering decimal number into a numeric field.
+    float: p.bool,
+
     // fieldName specifies the field used for
     // checking errors, change handlers, and value.
     //
     // If unset, it defaults to `name`.
     name: p.string.isRequired,
     fieldName: p.string,
+
+    // min and max values specify the range to clamp a int value
+    // expects an ISO timestamp, if string
+    min: p.oneOfType([p.number, p.string]),
+    max: p.oneOfType([p.number, p.string]),
 
     // used if name is set,
     // but the error name is different from graphql responses
@@ -47,19 +56,21 @@ export class FormField extends React.PureComponent {
     validate: p.func,
 
     // a hint for the user on a form field. errors take priority
-    hint: p.string,
+    hint: p.node,
 
     // disable the form helper text for errors.
     noError: p.bool,
+
+    step: p.oneOfType([p.number, p.string]),
   }
 
   static defaultProps = {
     validate: () => {},
-    mapValue: value => value,
-    mapOnChangeValue: value => value,
+    mapValue: (value) => value,
+    mapOnChangeValue: (value) => value,
   }
 
-  validate = value => {
+  validate = (value) => {
     if (
       this.props.required &&
       !['boolean', 'number'].includes(typeof value) &&
@@ -104,15 +115,12 @@ export class FormField extends React.PureComponent {
       InputLabelProps: _inputProps,
       mapValue,
       mapOnChangeValue,
+      min,
+      max,
       checkbox,
-
+      float,
       ...otherFieldProps
     } = this.props
-
-    const InputLabelProps = {
-      required: required && !optionalLabels,
-      ..._inputProps,
-    }
 
     const baseLabel = typeof _label === 'string' ? _label : startCase(name)
     const label =
@@ -125,28 +133,44 @@ export class FormField extends React.PureComponent {
       name,
       required,
       disabled: containerDisabled || fieldDisabled,
-      error: errors.find(err => err.field === (errorName || fieldName)),
+      error: errors.find((err) => err.field === (errorName || fieldName)),
       hint,
-      value: mapValue(get(value, fieldName)),
+      value: mapValue(get(value, fieldName), value),
+      min,
+      max,
+      float,
     }
 
-    let getValueOf = e => (e && e.target ? e.target.value : e)
+    const InputLabelProps = {
+      required: required && !optionalLabels,
+      ...shrinkWorkaround(props.value),
+      ..._inputProps,
+    }
+
+    let getValueOf = (e) => (e && e.target ? e.target.value : e)
     if (checkbox) {
       props.checked = props.value
-      props.value = props.value.toString()
-      getValueOf = e => e.target.checked
+      props.value = props.value ? 'true' : 'false'
+      getValueOf = (e) => e.target.checked
     } else if (otherFieldProps.type === 'number') {
       props.label = label
       props.value = props.value.toString()
       props.InputLabelProps = InputLabelProps
-      getValueOf = e => parseInt(e.target.value, 10)
+      getValueOf = (e) =>
+        float ? parseFloat(e.target.value) : parseInt(e.target.value, 10)
     } else {
       props.label = label
       props.InputLabelProps = InputLabelProps
     }
 
-    props.onChange = value =>
-      onChange(fieldName, mapOnChangeValue(getValueOf(value)))
+    props.onChange = (_value) => {
+      let newValue = getValueOf(_value)
+      if (props.type === 'number' && typeof props.min === 'number')
+        newValue = Math.max(props.min, newValue)
+      if (props.type === 'number' && typeof props.max === 'number')
+        newValue = Math.min(props.max, newValue)
+      onChange(fieldName, mapOnChangeValue(newValue, value))
+    }
 
     return (
       <MountWatcher
@@ -163,34 +187,50 @@ export class FormField extends React.PureComponent {
   }
 
   renderContent(props) {
-    const {
-      checkbox,
-      component,
-      formLabel,
-      label,
-      noError,
-      render,
-    } = this.props
+    const { checkbox, component, formLabel, label, noError, render } =
+      this.props
 
     if (render) return render(props)
     const Component = component
 
     return (
       <FormControl fullWidth={props.fullWidth} error={Boolean(props.error)}>
-        {formLabel && <FormLabel>{label}</FormLabel>}
+        {formLabel && (
+          <FormLabel style={{ paddingBottom: '0.5em' }}>{label}</FormLabel>
+        )}
         <Component
           {...props}
           error={checkbox ? undefined : Boolean(props.error)}
           label={this.props.formLabel ? null : props.label}
         />
-        {!noError && (props.error || props.hint) && (
-          <FormHelperText>
-            {(props.error &&
-              props.error.message.replace(/^./, str => str.toUpperCase())) ||
-              props.hint}
-          </FormHelperText>
-        )}
+        {!noError && this.renderFormHelperText(props.error, props.hint)}
       </FormControl>
     )
+  }
+
+  renderFormHelperText(error, hint) {
+    if (error?.helpLink) {
+      return (
+        <FormHelperText>
+          <AppLink to={error.helpLink} newTab data-cy='error-help-link'>
+            {error.message.replace(/^./, (str) => str.toUpperCase())}
+          </AppLink>
+        </FormHelperText>
+      )
+    }
+
+    if (error?.message) {
+      return (
+        <FormHelperText>
+          {error.message.replace(/^./, (str) => str.toUpperCase())}
+        </FormHelperText>
+      )
+    }
+
+    if (hint) {
+      return <FormHelperText>{hint}</FormHelperText>
+    }
+
+    return null
   }
 }

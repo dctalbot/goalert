@@ -3,11 +3,13 @@ package graphqlapp
 import (
 	context "context"
 	"database/sql"
+
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/graphql2"
 	"github.com/target/goalert/override"
 	"github.com/target/goalert/search"
 	"github.com/target/goalert/user"
+	"github.com/target/goalert/validation"
 )
 
 type UserOverride App
@@ -46,8 +48,11 @@ func (m *Mutation) UpdateUserOverride(ctx context.Context, input graphql2.Update
 }
 
 func (m *Mutation) CreateUserOverride(ctx context.Context, input graphql2.CreateUserOverrideInput) (*override.UserOverride, error) {
+	if input.ScheduleID == nil {
+		return nil, validation.NewFieldError("ScheduleID", "is required")
+	}
 	u := &override.UserOverride{
-		Target: assignment.ScheduleTarget(input.ScheduleID),
+		Target: assignment.ScheduleTarget(*input.ScheduleID),
 		Start:  input.Start,
 		End:    input.End,
 	}
@@ -124,6 +129,7 @@ func (q *Query) UserOverrides(ctx context.Context, input *graphql2.UserOverrideS
 	}
 
 	conn = new(graphql2.UserOverrideConnection)
+	conn.PageInfo = &graphql2.PageInfo{}
 	if len(overrides) == searchOpts.Limit {
 		overrides = overrides[:len(overrides)-1]
 		conn.PageInfo.HasNextPage = true

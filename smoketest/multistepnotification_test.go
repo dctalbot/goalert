@@ -1,9 +1,10 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestMultiStepNotifications tests that SMS and Voice goes out for
@@ -24,7 +25,7 @@ func TestMultiStepNotifications(t *testing.T) {
 	values
 		({{uuid "u1"}}, {{uuid "c1"}}, 0),
 		({{uuid "u1"}}, {{uuid "c2"}}, 0),
-		({{uuid "u1"}}, {{uuid "c1"}}, 1);
+		({{uuid "u1"}}, {{uuid "c1"}}, 30);
 
 	insert into escalation_policies (id, name) 
 	values 
@@ -47,15 +48,14 @@ func TestMultiStepNotifications(t *testing.T) {
 	h := harness.NewHarness(t, sql, "ids-to-uuids")
 	defer h.Close()
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 	d2 := tw.Device(h.Phone("2"))
 
 	d1.ExpectSMS("testing")
 	d2.ExpectVoice("testing")
-	tw.WaitAndAssert()
 
-	h.FastForward(time.Minute)
+	h.FastForward(30 * time.Minute)
 	d1.ExpectSMS("testing")
 
 }

@@ -1,9 +1,11 @@
 package rotation
 
 import (
+	"time"
+
+	"github.com/target/goalert/util/timeutil"
 	"github.com/target/goalert/validation"
 	"github.com/target/goalert/validation/validate"
-	"time"
 )
 
 type Rotation struct {
@@ -21,25 +23,17 @@ func (r Rotation) IsUserFavorite() bool {
 	return r.isUserFavorite
 }
 
-func addHours(t time.Time, n int) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour()+n, t.Minute(), t.Second(), t.Nanosecond(), t.Location())
-}
-
-func addHoursAlwaysInc(t time.Time, n int) time.Time {
-	res := addHours(t, n)
-	if n < 0 {
-		for !res.Before(t) {
-			n--
-			res = addHours(t, n)
-		}
-	} else {
-		for !res.After(t) {
-			n++
-			res = addHours(t, n)
-		}
+func (r Rotation) shiftClock() timeutil.Clock {
+	switch r.Type {
+	case TypeHourly:
+		return timeutil.NewClock(r.ShiftLength, 0)
+	case TypeDaily:
+		return timeutil.NewClock(r.ShiftLength*24, 0)
+	case TypeWeekly:
+		return timeutil.NewClock(r.ShiftLength*24*7, 0)
+	default:
+		panic("unexpected rotation type")
 	}
-
-	return res
 }
 
 // StartTime calculates the start of the "shift" that started at (or was active) at t.
@@ -48,51 +42,37 @@ func (r Rotation) StartTime(t time.Time) time.Time {
 	if r.ShiftLength <= 0 {
 		r.ShiftLength = 1
 	}
-	end := r.EndTime(t)
+	t = t.In(r.Start.Location()).Truncate(time.Minute)
+	r.Start = r.Start.Truncate(time.Minute)
 
-	switch r.Type {
-	case TypeHourly:
-		return addHoursAlwaysInc(end, -r.ShiftLength)
-	case TypeWeekly:
-		r.ShiftLength *= 7
-	case TypeDaily:
-	default:
-		panic("unexpected rotation type")
+	shiftClockLen := r.shiftClock()
+	rem := timeutil.ClockDiff(r.Start, t) % shiftClockLen
+
+	if rem < 0 {
+		rem += shiftClockLen
 	}
 
-	return end.AddDate(0, 0, -r.ShiftLength)
+	return timeutil.AddClock(t, -rem)
 }
 
-// EndTime calculates the end of the "shift" that started at (or was active)  at t.
+// EndTime calculates the end of the "shift" that started at (or was active) at t.
 //
-// For daily and weekly rotations, end time will be the next handoff time (from start).
+// It is guaranteed to occur after t.
 func (r Rotation) EndTime(t time.Time) time.Time {
 	if r.ShiftLength <= 0 {
 		r.ShiftLength = 1
 	}
-	t = t.Truncate(time.Minute)
-	cTime := r.Start.Truncate(time.Minute)
+	t = t.In(r.Start.Location()).Truncate(time.Minute)
+	r.Start = r.Start.Truncate(time.Minute)
 
-	switch r.Type {
-	case TypeHourly:
-		// while cTime (rotation start) is before t
-		for !cTime.After(t) {
-			cTime = addHoursAlwaysInc(cTime, r.ShiftLength)
-		}
-	case TypeWeekly:
-		r.ShiftLength *= 7
-		fallthrough
-	case TypeDaily:
-		// while cTime (rotation start) is before t
-		for !cTime.After(t) {
-			// getting end of shift
-			cTime = cTime.AddDate(0, 0, r.ShiftLength)
-		}
-	default:
-		panic("unexpected rotation type")
+	shiftClockLen := r.shiftClock()
+	rem := timeutil.ClockDiff(r.Start, t) % shiftClockLen
+
+	if rem < 0 {
+		rem += shiftClockLen
 	}
 
-	return cTime
+	return timeutil.AddClock(t, shiftClockLen-rem)
 }
 
 func (r Rotation) Normalize() (*Rotation, error) {

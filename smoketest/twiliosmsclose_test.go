@@ -1,9 +1,10 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestTwilioSMSClose checks that an SMS close message is processed.
@@ -21,7 +22,7 @@ func TestTwilioSMSClose(t *testing.T) {
 	insert into user_notification_rules (user_id, contact_method_id, delay_minutes) 
 	values
 		({{uuid "user"}}, {{uuid "cm1"}}, 0),
-		({{uuid "user"}}, {{uuid "cm1"}}, 1);
+		({{uuid "user"}}, {{uuid "cm1"}}, 30);
 
 	insert into escalation_policies (id, name) 
 	values
@@ -45,15 +46,13 @@ func TestTwilioSMSClose(t *testing.T) {
 	h := harness.NewHarness(t, sql, "ids-to-uuids")
 	defer h.Close()
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 
-	d1.ExpectSMS("testing").ThenReply("close 1")
-	d1.ExpectSMS("closed")
-	tw.WaitAndAssert()
+	d1.ExpectSMS("testing").
+		ThenReply("close 1").
+		ThenExpect("closed")
 
-	h.FastForward(time.Minute)
-
-	h.Delay(time.Second * 15)
+	h.FastForward(time.Hour)
 	// no more messages
 }

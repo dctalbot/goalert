@@ -3,9 +3,10 @@ package smoketest
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestGraphQLMultipleAlerts tests that all steps up to, and including, generating
@@ -24,7 +25,7 @@ func TestGraphQLMultipleAlerts(t *testing.T) {
 	insert into user_notification_rules (user_id, contact_method_id, delay_minutes) 
 	values
 		({{uuid "user"}}, {{uuid "cm1"}}, 0),
-		({{uuid "user"}}, {{uuid "cm1"}}, 1);
+		({{uuid "user"}}, {{uuid "cm1"}}, 30);
 
 	insert into escalation_policies (id, name) 
 	values
@@ -52,11 +53,8 @@ func TestGraphQLMultipleAlerts(t *testing.T) {
 	h.CreateAlert(sid, "alert2")
 
 	// Expect 2 SMS for 2 unacknowledged alerts
-	h.Twilio().Device(phone).ExpectSMS("alert1")
-	h.Twilio().Device(phone).ExpectSMS("alert2")
-
-	// No more SMS should be sent out
-	h.Twilio().WaitAndAssert()
+	h.Twilio(t).Device(phone).ExpectSMS("alert1")
+	h.Twilio(t).Device(phone).ExpectSMS("alert2")
 
 	h.CreateAlert(sid, "alert3")
 
@@ -79,10 +77,7 @@ func TestGraphQLMultipleAlerts(t *testing.T) {
 		}
 	}
 
-	h.Twilio().Device(phone).ExpectSMS("alert3")
-
-	// No more SMS should be sent out
-	h.Twilio().WaitAndAssert()
+	h.Twilio(t).Device(phone).ExpectSMS("alert3")
 
 	// Acknowledging alert #3
 	doQL2(fmt.Sprintf(`
@@ -94,13 +89,12 @@ func TestGraphQLMultipleAlerts(t *testing.T) {
 		}
 	`, 3), nil)
 
-	h.FastForward(1 * time.Minute)
+	h.FastForward(30 * time.Minute) // notification rule
 	// Expect 2 SMS for 2 unacknowledged alerts
-	h.Twilio().Device(phone).ExpectSMS("alert1")
-	h.Twilio().Device(phone).ExpectSMS("alert2")
+	h.Twilio(t).Device(phone).ExpectSMS("alert1")
+	h.Twilio(t).Device(phone).ExpectSMS("alert2")
 
-	// No SMS should be sent out
-	h.Twilio().WaitAndAssert()
+	h.FastForward(30 * time.Minute)
 
 	// Escalating multiple (3) alerts
 	doQL2(fmt.Sprintf(`
@@ -111,11 +105,9 @@ func TestGraphQLMultipleAlerts(t *testing.T) {
 	`, 1, 2, 3), nil)
 
 	// Expect 3 SMS for 3 escalated alerts
-	h.Twilio().Device(phone).ExpectSMS("alert1")
-	h.Twilio().Device(phone).ExpectSMS("alert2")
-	h.Twilio().Device(phone).ExpectSMS("alert3")
-
-	h.Twilio().WaitAndAssert()
+	h.Twilio(t).Device(phone).ExpectSMS("alert1")
+	h.Twilio(t).Device(phone).ExpectSMS("alert2")
+	h.Twilio(t).Device(phone).ExpectSMS("alert3")
 
 	// Closing multiple (3) alerts
 	doQL2(fmt.Sprintf(`
@@ -128,8 +120,5 @@ func TestGraphQLMultipleAlerts(t *testing.T) {
 	`, 1, 2, 3), nil)
 
 	h.FastForward(1 * time.Minute)
-
-	// No more messages should be sent out
-	h.Twilio().WaitAndAssert()
 
 }

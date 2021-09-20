@@ -13,7 +13,7 @@ func (app *App) initEngine(ctx context.Context) error {
 
 	var regionIndex int
 	err := app.db.QueryRowContext(ctx, `SELECT id FROM region_ids WHERE name = $1`, app.cfg.RegionName).Scan(&regionIndex)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		// doesn't exist, try to create
 		err = app.db.QueryRowContext(ctx, `
 		WITH inserted AS (
@@ -30,14 +30,16 @@ func (app *App) initEngine(ctx context.Context) error {
 		return errors.Wrap(err, "get region index")
 	}
 
-	app.engine, err = engine.NewEngine(ctx, app.db, &engine.Config{
-		AlertStore:         app.AlertStore,
-		AlertLogStore:      app.AlertLogStore,
-		ContactMethodStore: app.ContactMethodStore,
-		NotificationSender: app.notificationManager,
-		UserStore:          app.UserStore,
-		NotificationStore:  app.NotificationStore,
-		NCStore:            app.NCStore,
+	app.Engine, err = engine.NewEngine(ctx, app.db, &engine.Config{
+		AlertStore:          app.AlertStore,
+		AlertLogStore:       app.AlertLogStore,
+		ContactMethodStore:  app.ContactMethodStore,
+		NotificationManager: app.notificationManager,
+		UserStore:           app.UserStore,
+		NotificationStore:   app.NotificationStore,
+		NCStore:             app.NCStore,
+		OnCallStore:         app.OnCallStore,
+		ScheduleStore:       app.ScheduleStore,
 
 		ConfigSource: app.ConfigStore,
 
@@ -51,7 +53,7 @@ func (app *App) initEngine(ctx context.Context) error {
 		return errors.Wrap(err, "init engine")
 	}
 
-	app.notificationManager.RegisterReceiver(app.engine)
+	app.notificationManager.SetResultReceiver(app.Engine)
 
 	return nil
 }

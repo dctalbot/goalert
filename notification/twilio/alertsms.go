@@ -2,11 +2,13 @@ package twilio
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"text/template"
 	"unicode"
 
 	"github.com/pkg/errors"
+	"github.com/target/goalert/config"
 )
 
 // 160 GSM characters (140 bytes) is the max for a single segment message.
@@ -18,21 +20,28 @@ import (
 const maxGSMLen = 160
 
 type alertSMS struct {
-	ID   int
-	Body string
-	Link string
-	Code int
+	ID    int
+	Count int
+	Body  string
+	Link  string
+	Code  int
 }
 
-var smsTmpl = template.Must(template.New("alertSMS").Parse(
-	`Alert #{{.ID}}: {{.Body}}
+var smsTmpl = template.Must(template.New("alertSMS").Parse(`
+{{- if .ID}}Alert #{{.ID}}: {{.Body}}
+{{- else if .Count}}Svc '{{.Body}}': {{.Count}} unacked alert{{if gt .Count 1}}s{{end}}
+{{- end}}
 {{- if .Link }}
 
 {{.Link}}
 {{- end}}
+{{- if and .Count .ID }}
+
+{{.Count}} other alert{{if gt .Count 1}}s have{{else}} has{{end}} been updated.
+{{- end}}
 {{- if .Code}}
 
-Reply '{{.Code}}a' to ack, '{{.Code}}c' to close.
+Reply '{{.Code}}a{{if .Count}}a{{end}}' to ack{{if .Count}} all{{end}}, '{{.Code}}c{{if .Count}}c{{end}}' to close{{if .Count}} all{{end}}.
 {{- end}}`,
 ))
 
@@ -85,7 +94,11 @@ func mapGSM(r rune) rune {
 }
 
 // hasTwoWaySMSSupport returns true if a number supports 2-way SMS messaging (replies).
-func hasTwoWaySMSSupport(number string) bool {
+func hasTwoWaySMSSupport(ctx context.Context, number string) bool {
+	if config.FromContext(ctx).Twilio.DisableTwoWaySMS {
+		return false
+	}
+
 	// India numbers do not support SMS replies.
 	return !strings.HasPrefix(number, "+91")
 }
@@ -93,8 +106,8 @@ func hasTwoWaySMSSupport(number string) bool {
 // Render will render a single-segment SMS.
 //
 // Non-GSM characters will be replaced with '?' and Body will be
-// truncated (if needed) until the output is <= 160 characters.
-func (a alertSMS) Render() (string, error) {
+// truncated (if needed) until the output is <= maxLen characters.
+func (a alertSMS) Render(maxLen int) (string, error) {
 	a.Body = strings.Map(mapGSM, a.Body)
 	a.Body = strings.Replace(a.Body, "  ", " ", -1)
 	a.Body = strings.TrimSpace(a.Body)
@@ -105,8 +118,8 @@ func (a alertSMS) Render() (string, error) {
 		return "", err
 	}
 
-	if buf.Len() > maxGSMLen {
-		newBodyLen := len(a.Body) - (buf.Len() - maxGSMLen)
+	if buf.Len() > maxLen {
+		newBodyLen := len(a.Body) - (buf.Len() - maxLen)
 		if newBodyLen <= 0 {
 			return "", errors.New("message too long to include body")
 		}

@@ -1,14 +1,13 @@
 import React from 'react'
+import { gql, useQuery } from '@apollo/client'
 import p from 'prop-types'
-import { urlParamSelector } from '../selectors'
-import { setURLParam } from '../actions'
-import gql from 'graphql-tag'
 import { FormControlLabel, Switch } from '@material-ui/core'
-import { useQuery } from 'react-apollo'
-import { useSelector, useDispatch } from 'react-redux'
+import { DateTime } from 'luxon'
+
+import { useURLParam } from '../actions/hooks'
 
 const tzQuery = gql`
-  query($id: ID!) {
+  query ($id: ID!) {
     schedule(id: $id) {
       id
       timeZone
@@ -17,10 +16,7 @@ const tzQuery = gql`
 `
 
 export function ScheduleTZFilter(props) {
-  const params = useSelector(urlParamSelector)
-  const zone = params('tz', 'local')
-  const dispatch = useDispatch()
-  const setZone = value => dispatch(setURLParam('tz', value, 'local'))
+  const [zone, setZone] = useURLParam('tz', 'local')
   const { data, loading, error } = useQuery(tzQuery, {
     pollInterval: 0,
     variables: { id: props.scheduleID },
@@ -29,19 +25,22 @@ export function ScheduleTZFilter(props) {
   let label, tz
   if (error) {
     label = 'Error: ' + (error.message || error)
-  } else if (loading) {
+  } else if (!data && loading) {
     label = 'Fetching timezone information...'
   } else {
     tz = data.schedule.timeZone
-    label = props.label ? props.label(tz) : `Show times in ${tz}`
+    const short = DateTime.fromObject({ zone: tz }).toFormat('ZZZZ')
+    const tzName = tz === short ? tz : tz + ` (${short})`
+    label = props.label ? props.label(tzName) : `Show times in ${tzName}`
   }
 
   return (
     <FormControlLabel
+      data-cy='tz-switch'
       control={
         <Switch
           checked={zone !== 'local'}
-          onChange={e => setZone(e.target.checked ? tz : 'local')}
+          onChange={(e) => setZone(e.target.checked ? tz : 'local')}
           value={tz}
           disabled={Boolean(loading || error)}
         />
@@ -50,6 +49,7 @@ export function ScheduleTZFilter(props) {
     />
   )
 }
+
 ScheduleTZFilter.propTypes = {
   label: p.func,
 

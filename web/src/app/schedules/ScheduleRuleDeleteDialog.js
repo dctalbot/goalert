@@ -1,14 +1,14 @@
 import React from 'react'
+import { gql } from '@apollo/client'
 import p from 'prop-types'
-import { Mutation } from 'react-apollo'
+import { Mutation } from '@apollo/client/react/components'
 import FormDialog from '../dialogs/FormDialog'
 import { nonFieldErrors } from '../util/errutil'
-import gql from 'graphql-tag'
-import { startCase } from 'lodash-es'
+import { startCase } from 'lodash'
 import Query from '../util/Query'
 
 const query = gql`
-  query($id: ID!, $tgt: TargetInput!) {
+  query ($id: ID!, $tgt: TargetInput!) {
     schedule(id: $id) {
       id
       target(input: $tgt) {
@@ -23,50 +23,18 @@ const query = gql`
 `
 
 const mutation = gql`
-  mutation($input: ScheduleTargetInput!) {
+  mutation ($input: ScheduleTargetInput!) {
     updateScheduleTarget(input: $input)
   }
 `
 
-export default class ScheduleRuleDeleteDialog extends React.PureComponent {
-  static propTypes = {
-    scheduleID: p.string.isRequired,
-    target: p.shape({ id: p.string.isRequired, type: p.string.isRequired })
-      .isRequired,
-    onClose: p.func,
-  }
-
-  render() {
-    return (
-      <Query
-        query={query}
-        variables={{
-          id: this.props.scheduleID,
-          tgt: this.props.target,
-        }}
-        noPoll
-        render={({ data }) => this.renderMutation(data.schedule.target)}
-      />
-    )
-  }
-  renderMutation(data) {
-    return (
-      <Mutation
-        mutation={mutation}
-        onCompleted={this.props.onClose}
-        refetchQueries={['scheduleRules']}
-      >
-        {(commit, status) => this.renderDialog(data, commit, status)}
-      </Mutation>
-    )
-  }
-
-  renderDialog(data, commit, status) {
+export default function ScheduleRuleDeleteDialog(props) {
+  function renderDialog(data, commit, status) {
     return (
       <FormDialog
-        onClose={this.props.onClose}
-        title={`Remove ${startCase(this.props.target.type)} From Schedule?`}
-        subTitle={`This will remove all rules, as well as end any active or future on-call shifts on this schedule for ${this.props.target.type}: ${data.target.name}.`}
+        onClose={props.onClose}
+        title={`Remove ${startCase(props.target.type)} From Schedule?`}
+        subTitle={`This will remove all rules, as well as end any active or future on-call shifts on this schedule for ${props.target.type}: ${data.target.name}.`}
         caption='Overrides will not be affected.'
         confirm
         errors={nonFieldErrors(status.error)}
@@ -74,8 +42,8 @@ export default class ScheduleRuleDeleteDialog extends React.PureComponent {
           commit({
             variables: {
               input: {
-                target: this.props.target,
-                scheduleID: this.props.scheduleID,
+                target: props.target,
+                scheduleID: props.scheduleID,
 
                 rules: [],
               },
@@ -85,4 +53,31 @@ export default class ScheduleRuleDeleteDialog extends React.PureComponent {
       />
     )
   }
+
+  function renderMutation(data) {
+    return (
+      <Mutation mutation={mutation} onCompleted={props.onClose}>
+        {(commit, status) => renderDialog(data, commit, status)}
+      </Mutation>
+    )
+  }
+
+  return (
+    <Query
+      query={query}
+      variables={{
+        id: props.scheduleID,
+        tgt: props.target,
+      }}
+      noPoll
+      render={({ data }) => renderMutation(data.schedule.target)}
+    />
+  )
+}
+
+ScheduleRuleDeleteDialog.propTypes = {
+  scheduleID: p.string.isRequired,
+  target: p.shape({ id: p.string.isRequired, type: p.string.isRequired })
+    .isRequired,
+  onClose: p.func,
 }

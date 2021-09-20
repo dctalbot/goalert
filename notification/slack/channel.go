@@ -11,17 +11,20 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/target/goalert/alert"
 	"github.com/target/goalert/config"
 	"github.com/target/goalert/notification"
 	"github.com/target/goalert/permission"
+	"github.com/target/goalert/util/log"
 	"github.com/target/goalert/validation"
 	"golang.org/x/net/context/ctxhttp"
 )
 
 type ChannelSender struct {
-	cfg    Config
-	resp   chan *notification.MessageResponse
-	status chan *notification.MessageStatus
+	cfg Config
+
+	teamID string
+	token  string
 
 	chanTht *throttle
 	listTht *throttle
@@ -31,15 +34,14 @@ type ChannelSender struct {
 
 	listMx sync.Mutex
 	chanMx sync.Mutex
+	teamMx sync.Mutex
 }
 
-var _ notification.SendResponder = &ChannelSender{}
+var _ notification.Sender = &ChannelSender{}
 
 func NewChannelSender(ctx context.Context, cfg Config) (*ChannelSender, error) {
 	return &ChannelSender{
-		cfg:    cfg,
-		resp:   make(chan *notification.MessageResponse),
-		status: make(chan *notification.MessageStatus),
+		cfg: cfg,
 
 		chanTht: newThrottle(time.Minute / 50),
 		listTht: newThrottle(time.Minute / 50),
@@ -51,25 +53,40 @@ func NewChannelSender(ctx context.Context, cfg Config) (*ChannelSender, error) {
 
 // Channel contains information about a Slack channel.
 type Channel struct {
-	ID   string
-	Name string
+	ID     string
+	Name   string
+	TeamID string
 }
 
-type slackError string
+type apiError struct {
+	msg    string
+	header http.Header
+}
 
-func (err slackError) Error() string     { return string(err) }
-func (err slackError) ClientError() bool { return true }
-func wrapError(errMsg, details string) error {
-	switch errMsg {
-	case "missing_scope":
-		// happens if the ID is for a user
-		return validation.NewFieldError("ChannelID", "Only channels supported.")
+func (err apiError) Error() string {
+	if err.msg == "missing_scope" {
+		acceptedScopes := err.header.Get("X-Accepted-Oauth-Scopes")
+		providedScopes := err.header.Get("X-Oauth-Scopes")
+		return fmt.Sprintf("missing_scope; need one of %v but got %v", acceptedScopes, providedScopes)
+	}
+	return err.msg
+}
+
+func mapError(ctx context.Context, err error) error {
+	var apiError *apiError
+	if !errors.As(err, &apiError) {
+		return err
+	}
+
+	switch apiError.msg {
 	case "channel_not_found":
 		return validation.NewFieldError("ChannelID", "Invalid Slack channel ID.")
-	case "invalid_auth", "account_inactive", "token_revoked", "not_authed":
-		return slackError("User account must be linked.")
+	case "missing_scope", "invalid_auth", "account_inactive", "token_revoked", "not_authed":
+		log.Log(ctx, err)
+		return validation.NewFieldError("ChannelID", "Permission Denied.")
 	}
-	return errors.Wrap(errors.New(errMsg), details)
+
+	return err
 }
 
 // Channel will lookup a single Slack channel for the bot.
@@ -85,7 +102,7 @@ func (s *ChannelSender) Channel(ctx context.Context, channelID string) (*Channel
 	if !ok {
 		ch, err := s.loadChannel(ctx, channelID)
 		if err != nil {
-			return nil, err
+			return nil, mapError(ctx, err)
 		}
 		s.chanCache.Add(channelID, ch)
 		return ch, nil
@@ -97,8 +114,33 @@ func (s *ChannelSender) Channel(ctx context.Context, channelID string) (*Channel
 	return res.(*Channel), nil
 }
 
+func (s *ChannelSender) TeamID(ctx context.Context) (string, error) {
+	cfg := config.FromContext(ctx)
+
+	s.teamMx.Lock()
+	defer s.teamMx.Unlock()
+	if s.teamID == "" || s.token != cfg.Slack.AccessToken {
+		// teamID missing or token changed
+		id, err := s.lookupTeamIDForToken(ctx, cfg.Slack.AccessToken)
+		if err != nil {
+			return "", err
+		}
+
+		// update teamID and token after fetching succeeds
+		s.teamID = id
+		s.token = cfg.Slack.AccessToken
+	}
+
+	return s.teamID, nil
+}
+
 func (s *ChannelSender) loadChannel(ctx context.Context, channelID string) (*Channel, error) {
 	cfg := config.FromContext(ctx)
+
+	teamID, err := s.TeamID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("lookup team ID: %w", err)
+	}
 
 	v := make(url.Values)
 	// Parameters and URL documented here:
@@ -117,7 +159,7 @@ func (s *ChannelSender) loadChannel(ctx context.Context, channelID string) (*Cha
 		}
 	}
 
-	err := s.chanTht.Wait(ctx)
+	err = s.chanTht.Wait(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -146,12 +188,13 @@ func (s *ChannelSender) loadChannel(ctx context.Context, channelID string) (*Cha
 	}
 
 	if !resData.OK {
-		return nil, wrapError(resData.Error, "lookup Slack channel")
+		return nil, fmt.Errorf("lookup Slack channel: %w", &apiError{msg: resData.Error, header: resp.Header})
 	}
 
 	return &Channel{
-		ID:   resData.Channel.ID,
-		Name: "#" + resData.Channel.Name,
+		ID:     resData.Channel.ID,
+		Name:   "#" + resData.Channel.Name,
+		TeamID: teamID,
 	}, nil
 }
 
@@ -169,7 +212,7 @@ func (s *ChannelSender) ListChannels(ctx context.Context) ([]Channel, error) {
 	if !ok {
 		chs, err := s.loadChannels(ctx)
 		if err != nil {
-			return nil, err
+			return nil, mapError(ctx, err)
 		}
 		ch2 := make([]Channel, len(chs))
 		copy(ch2, chs)
@@ -248,7 +291,7 @@ func (s *ChannelSender) loadChannels(ctx context.Context) ([]Channel, error) {
 		}
 
 		if !resData.OK {
-			return nil, wrapError(resData.Error, "list Slack channels")
+			return nil, fmt.Errorf("list Slack channels: %w", &apiError{msg: resData.Error, header: resp.Header})
 		}
 
 		channels = append(channels, resData.Channels...)
@@ -267,14 +310,47 @@ func (s *ChannelSender) loadChannels(ctx context.Context) ([]Channel, error) {
 	return channels, nil
 }
 
-func (s *ChannelSender) Send(ctx context.Context, msg notification.Message) (*notification.MessageStatus, error) {
+func (s *ChannelSender) Send(ctx context.Context, msg notification.Message) (*notification.SentMessage, error) {
 	cfg := config.FromContext(ctx)
+
+	// Note: We don't use cfg.ApplicationName() here since that is configured in the Slack app as the bot name.
 
 	vals := make(url.Values)
 	// Parameters & URL documented here:
 	// https://api.slack.com/methods/chat.postMessage
 	vals.Set("channel", msg.Destination().Value)
-	vals.Set("text", fmt.Sprintf("Alert: %s\n\n<%s>", msg.Body(), cfg.CallbackURL("/alerts/"+strconv.Itoa(msg.SubjectID()))))
+	switch t := msg.(type) {
+	case notification.Alert:
+		if t.OriginalStatus != nil {
+			// Reply in thread if we already sent a message for this alert.
+			vals.Set("thread_ts", t.OriginalStatus.ProviderMessageID.ExternalID)
+			vals.Set("text", "Broadcasting to channel due to repeat notification.")
+			vals.Set("reply_broadcast", "true")
+			break
+		}
+
+		vals.Set("text", fmt.Sprintf("Alert: %s\n\n<%s>", t.Summary, cfg.CallbackURL("/alerts/"+strconv.Itoa(t.AlertID))))
+	case notification.AlertStatus:
+		vals.Set("thread_ts", t.OriginalStatus.ProviderMessageID.ExternalID)
+		var status string
+		switch t.NewAlertStatus {
+		case alert.StatusActive:
+			status = "Acknowledged"
+		case alert.StatusTriggered:
+			status = "Unacknowledged"
+		case alert.StatusClosed:
+			status = "Closed"
+		}
+
+		text := "Status Update: " + status + "\n" + t.LogEntry
+		vals.Set("text", text)
+	case notification.AlertBundle:
+		vals.Set("text", fmt.Sprintf("Service '%s' has %d unacknowledged alerts.\n\n<%s>", t.ServiceName, t.Count, cfg.CallbackURL("/services/"+t.ServiceID+"/alerts")))
+	case notification.ScheduleOnCallUsers:
+		vals.Set("text", s.onCallNotificationText(ctx, t))
+	default:
+		return nil, errors.Errorf("unsupported message type: %T", t)
+	}
 	vals.Set("token", cfg.Slack.AccessToken)
 
 	resp, err := http.PostForm(s.cfg.url("/api/chat.postMessage"), vals)
@@ -287,9 +363,12 @@ func (s *ChannelSender) Send(ctx context.Context, msg notification.Message) (*no
 	}
 
 	var resData struct {
-		OK    bool
-		Error string
-		TS    string
+		OK      bool
+		Error   string
+		TS      string
+		Message struct {
+			BotID string `json:"bot_id"`
+		}
 	}
 	err = json.NewDecoder(resp.Body).Decode(&resData)
 	if err != nil {
@@ -299,15 +378,32 @@ func (s *ChannelSender) Send(ctx context.Context, msg notification.Message) (*no
 		return nil, errors.Errorf("Slack error: %s", resData.Error)
 	}
 
-	return &notification.MessageStatus{
-		ID:                msg.ID(),
-		ProviderMessageID: resData.TS,
-		State:             notification.MessageStateDelivered,
+	return &notification.SentMessage{
+		ExternalID: resData.TS,
+		State:      notification.StateDelivered,
+		SrcValue:   resData.Message.BotID,
 	}, nil
 }
-func (s *ChannelSender) Status(ctx context.Context, id, providerID string) (*notification.MessageStatus, error) {
-	return nil, errors.New("not implemented")
-}
 
-func (s *ChannelSender) ListenStatus() <-chan *notification.MessageStatus     { return s.status }
-func (s *ChannelSender) ListenResponse() <-chan *notification.MessageResponse { return s.resp }
+func (s *ChannelSender) lookupTeamIDForToken(ctx context.Context, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", s.cfg.url("/api/auth.test"), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		TeamID string `json:"team_id"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&body)
+	if err != nil {
+		return "", err
+	}
+	return body.TeamID, nil
+}

@@ -9,9 +9,9 @@ import ServiceRouter from '../services/ServiceRouter'
 import UserRouter from '../users/UserRouter'
 import AdminRouter from '../admin/AdminRouter'
 import WizardRouter from '../wizard/WizardRouter'
-import IntegrationKeyAPI from '../documentation/components/IntegrationKeyAPI'
+import Documentation from '../documentation/Documentation'
 
-export const getPath = p => (Array.isArray(p.path) ? p.path[0] : p.path)
+export const getPath = (p) => (Array.isArray(p.path) ? p.path[0] : p.path)
 
 export function renderRoutes(routeConfig = []) {
   const routes = []
@@ -130,12 +130,22 @@ export default [
         path: '/admin/config',
         component: AdminRouter,
       },
+      {
+        title: 'System Limits',
+        path: '/admin/limits',
+        component: AdminRouter,
+      },
+      {
+        title: 'Toolbox',
+        path: '/admin/toolbox',
+        component: AdminRouter,
+      },
     ],
   },
   {
     nav: false,
     title: 'Documentation',
     path: '/docs',
-    component: IntegrationKeyAPI,
+    component: Documentation,
   },
 ]

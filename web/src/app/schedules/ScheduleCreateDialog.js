@@ -1,13 +1,13 @@
-import React from 'react'
+import React, { useState } from 'react'
+import { gql } from '@apollo/client'
 import FormDialog from '../dialogs/FormDialog'
 import ScheduleForm from './ScheduleForm'
-import gql from 'graphql-tag'
-import { Mutation } from 'react-apollo'
+import { Mutation } from '@apollo/client/react/components'
 import { nonFieldErrors, fieldErrors } from '../util/errutil'
 import { Redirect } from 'react-router'
 
 const mutation = gql`
-  mutation($input: CreateScheduleInput!) {
+  mutation ($input: CreateScheduleInput!) {
     createSchedule(input: $input) {
       id
       name
@@ -17,34 +17,31 @@ const mutation = gql`
   }
 `
 
-export default class ScheduleCreateDialog extends React.PureComponent {
-  state = {
-    value: {
-      name: '',
-      description: '',
-      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      favorite: true,
-    },
-  }
-  render() {
-    return <Mutation mutation={mutation}>{this.renderForm}</Mutation>
-  }
-  renderForm = (commit, status) => {
+export default function ScheduleCreateDialog(props) {
+  const [value, setValue] = useState({
+    name: '',
+    description: '',
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    favorite: true,
+  })
+
+  function renderForm(commit, status) {
     if (status.data && status.data.createSchedule) {
       return (
         <Redirect push to={`/schedules/${status.data.createSchedule.id}`} />
       )
     }
+
     return (
       <FormDialog
-        onClose={this.props.onClose}
+        onClose={props.onClose}
         title='Create New Schedule'
         errors={nonFieldErrors(status.error)}
         onSubmit={() =>
           commit({
             variables: {
               input: {
-                ...this.state.value,
+                ...value,
                 targets: [
                   {
                     target: { type: 'user', id: '__current_user' },
@@ -59,11 +56,12 @@ export default class ScheduleCreateDialog extends React.PureComponent {
           <ScheduleForm
             disabled={status.loading}
             errors={fieldErrors(status.error)}
-            value={this.state.value}
-            onChange={value => this.setState({ value })}
+            value={value}
+            onChange={(value) => setValue(value)}
           />
         }
       />
     )
   }
+  return <Mutation mutation={mutation}>{renderForm}</Mutation>
 }

@@ -3,11 +3,10 @@ package notification
 import (
 	"context"
 	"fmt"
-	"github.com/target/goalert/util/log"
-	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
+	"github.com/target/goalert/util/log"
 	"go.opencensus.io/trace"
 )
 
@@ -18,23 +17,19 @@ type Manager struct {
 	providers   map[string]*namedSender
 	searchOrder []*namedSender
 
-	r  Receiver
+	ResultReceiver
 	mx *sync.RWMutex
-
-	shutdownCh chan struct{}
-	shutdownWg sync.WaitGroup
 
 	stubNotifiers bool
 }
 
-var _ Sender = &Manager{}
+var _ ResultReceiver = Manager{}
 
 // NewManager initializes a new Manager.
 func NewManager() *Manager {
 	return &Manager{
-		mx:         new(sync.RWMutex),
-		shutdownCh: make(chan struct{}),
-		providers:  make(map[string]*namedSender),
+		mx:        new(sync.RWMutex),
+		providers: make(map[string]*namedSender),
 	}
 }
 
@@ -45,128 +40,97 @@ func (mgr *Manager) SetStubNotifiers() {
 	mgr.stubNotifiers = true
 }
 
-func bgSpan(ctx context.Context, name string) (context.Context, *trace.Span) {
-	var sp *trace.Span
-	if ctx != nil {
-		sp = trace.FromContext(ctx)
+// FormatDestValue will format the destination value if an available FriendlyValuer exists
+// for the destType or return the original.
+func (mgr *Manager) FormatDestValue(ctx context.Context, destType DestType, value string) string {
+	if value == "" {
+		return ""
 	}
-	if sp == nil {
-		return trace.StartSpan(context.Background(), name)
-	}
+	mgr.mx.RLock()
+	defer mgr.mx.RUnlock()
 
-	return trace.StartSpanWithRemoteParent(context.Background(), name, sp.SpanContext())
-}
-
-// Shutdown will stop the manager, waiting for pending background operations to finish.
-func (m *Manager) Shutdown(context.Context) error {
-	close(m.shutdownCh)
-	m.shutdownWg.Wait()
-	return nil
-}
-
-func (m *Manager) senderLoop(s *namedSender) {
-	defer m.shutdownWg.Done()
-
-	handleResponse := func(resp *MessageResponse) {
-		ctx, sp := bgSpan(resp.Ctx, "NotificationManager.Response")
-		cpy := *resp
-		cpy.Ctx = ctx
-
-		err := m.receive(ctx, s.name, &cpy)
-		sp.End()
-		resp.Err <- err
-	}
-
-	for {
-		select {
-		case resp := <-s.ListenResponse():
-			handleResponse(resp)
-		default:
+	for _, s := range mgr.searchOrder {
+		if s.destType != destType {
+			continue
 		}
 
-		select {
-		case resp := <-s.ListenResponse():
-			handleResponse(resp)
-		case stat := <-s.ListenStatus():
-			ctx, sp := bgSpan(stat.Ctx, "NotificationManager.StatusUpdate")
-			m.updateStatus(ctx, stat.wrap(ctx, s))
-			sp.End()
-		case <-m.shutdownCh:
-			return
+		f, ok := s.Sender.(FriendlyValuer)
+		if !ok {
+			continue
 		}
+
+		newValue, err := f.FriendlyValue(ctx, value)
+		if err != nil {
+			log.Log(ctx, fmt.Errorf("format dest value with '%s': %w", s.name, err))
+			continue
+		}
+
+		return newValue
 	}
+	return value
 }
 
-// Status will return the current status of a message.
-func (m *Manager) Status(ctx context.Context, id, providerMsgID string) (*MessageStatus, error) {
-	parts := strings.SplitN(providerMsgID, ":", 2)
-	if len(parts) != 2 {
-		return nil, errors.Errorf("invalid provider message ID '%s'", providerMsgID)
-	}
+// MessageStatus will return the current status of a message.
+func (mgr *Manager) MessageStatus(ctx context.Context, messageID string, providerMsgID ProviderMessageID) (*Status, error) {
 
-	provider := m.providers[parts[0]]
+	provider := mgr.providers[providerMsgID.ProviderName]
 	if provider == nil {
-		return nil, errors.Errorf("unknown provider ID '%s'", parts[0])
+		return nil, errors.Errorf("unknown provider ID '%s'", providerMsgID.ProviderName)
+	}
+
+	checker, ok := provider.Sender.(StatusChecker)
+	if !ok {
+		return nil, ErrStatusUnsupported
 	}
 
 	ctx, sp := trace.StartSpan(ctx, "NotificationManager.Status")
 	sp.AddAttributes(
-		trace.StringAttribute("provider.id", parts[0]),
-		trace.StringAttribute("provider.message.id", parts[1]),
+		trace.StringAttribute("provider.id", providerMsgID.ExternalID),
+		trace.StringAttribute("provider.message.id", providerMsgID.ProviderName),
 	)
 	defer sp.End()
-	stat, err := provider.Status(ctx, id, parts[1])
-	if stat != nil {
-		stat = stat.wrap(ctx, provider)
-	}
-	return stat, err
+	return checker.Status(ctx, providerMsgID.ExternalID)
 }
 
 // RegisterSender will register a sender under a given DestType and name.
 // A sender for the same name and type will replace an existing one, if any.
-func (m *Manager) RegisterSender(t DestType, name string, s SendResponder) {
-	m.mx.Lock()
-	defer m.mx.Unlock()
+func (mgr *Manager) RegisterSender(t DestType, name string, s Sender) {
+	mgr.mx.Lock()
+	defer mgr.mx.Unlock()
 
-	_, ok := m.providers[name]
+	_, ok := mgr.providers[name]
 	if ok {
 		panic("name already taken")
 	}
-	if m.stubNotifiers {
+	if mgr.stubNotifiers {
 		// disable notification sending
 		s = stubSender{}
 	}
 
-	n := &namedSender{name: name, SendResponder: s, destType: t}
-	m.providers[name] = n
-	m.searchOrder = append(m.searchOrder, n)
-	m.shutdownWg.Add(1)
-	go m.senderLoop(n)
-}
+	n := &namedSender{name: name, Sender: s, destType: t}
+	mgr.providers[name] = n
+	mgr.searchOrder = append(mgr.searchOrder, n)
 
-// UpdateStatus will update the status of a message.
-func (m *Manager) updateStatus(ctx context.Context, status *MessageStatus) {
-	err := m.r.UpdateStatus(ctx, status)
-	if err != nil {
-		log.Log(ctx, errors.Wrap(err, "update message status"))
+	if rs, ok := s.(ReceiverSetter); ok {
+		rs.SetReceiver(&namedReceiver{ns: n, r: mgr})
 	}
 }
 
-// RegisterReceiver will set the given Receiver as the target for all Receive() calls.
+// SetResultReceiver will set the ResultReceiver as the target for all Receiver calls.
 // It will panic if called multiple times.
-func (m *Manager) RegisterReceiver(r Receiver) {
-	if m.r != nil {
-		panic("tried to register a second Receiver")
+func (mgr *Manager) SetResultReceiver(p ResultReceiver) {
+	if mgr.ResultReceiver != nil {
+		panic("tried to register a second Processor instance")
 	}
-	m.r = r
+	mgr.ResultReceiver = p
 }
 
-// Send implements the Sender interface by trying all registered senders for the type given
+// SendMessage tries all registered senders for the type given
 // in Notification. An error is returned if there are no registered senders for the type
 // or if an error is returned from all of them.
-func (m *Manager) Send(ctx context.Context, msg Message) (*MessageStatus, error) {
-	m.mx.RLock()
-	defer m.mx.RUnlock()
+func (mgr *Manager) SendMessage(ctx context.Context, msg Message) (*SendResult, error) {
+	mgr.mx.RLock()
+	defer mgr.mx.RUnlock()
 
 	destType := msg.Destination().Type
 
@@ -179,7 +143,7 @@ func (m *Manager) Send(ctx context.Context, msg Message) (*MessageStatus, error)
 	}
 
 	var tried bool
-	for _, s := range m.searchOrder {
+	for _, s := range mgr.searchOrder {
 		if s.destType != destType {
 			continue
 		}
@@ -192,43 +156,22 @@ func (m *Manager) Send(ctx context.Context, msg Message) (*MessageStatus, error)
 			trace.StringAttribute("message.type", msg.Type().String()),
 			trace.StringAttribute("message.id", msg.ID()),
 		)
-		status, err := s.Send(sendCtx, msg)
+		res, err := s.Send(sendCtx, msg)
 		sp.End()
 		if err != nil {
 			log.Log(sendCtx, errors.Wrap(err, "send notification"))
 			continue
 		}
-		log.Debugf(sendCtx, "notification sent")
+		log.Logf(sendCtx, "notification sent")
+		metricSentTotal.
+			WithLabelValues(msg.Destination().Type.String(), msg.Type().String()).
+			Inc()
 		// status already wrapped via namedSender
-		return status, nil
+		return res, nil
 	}
 	if !tried {
 		return nil, fmt.Errorf("no senders registered for type '%s'", destType)
 	}
 
 	return nil, errors.New("all notification senders failed")
-}
-
-func (m *Manager) receive(ctx context.Context, providerID string, resp *MessageResponse) error {
-	ctx, sp := trace.StartSpan(ctx, "NotificationManager.Receive")
-	defer sp.End()
-	sp.AddAttributes(
-		trace.StringAttribute("provider.id", providerID),
-		trace.StringAttribute("message.id", resp.ID),
-		trace.StringAttribute("dest.type", string(resp.From.Type)),
-		trace.StringAttribute("dest.value", resp.From.Value),
-		trace.StringAttribute("response", resp.Result.String()),
-	)
-	log.Debugf(log.WithFields(ctx, log.Fields{
-		"Result":     resp.Result,
-		"CallbackID": resp.ID,
-		"ProviderID": providerID,
-	}),
-		"response received",
-	)
-	if resp.Result == ResultStop {
-		return m.r.Stop(ctx, resp.From)
-	}
-
-	return m.r.Receive(ctx, resp.ID, resp.Result)
 }

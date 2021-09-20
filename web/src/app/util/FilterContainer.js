@@ -1,16 +1,17 @@
-import React from 'react'
+import React, { useState } from 'react'
+import p from 'prop-types'
 import {
   Hidden,
   Popover,
   SwipeableDrawer,
-  withStyles,
   IconButton,
   Grid,
   Button,
+  makeStyles,
 } from '@material-ui/core'
-import { FilterList } from '@material-ui/icons'
+import { FilterList as FilterIcon } from '@material-ui/icons'
 
-const style = theme => {
+const useStyles = makeStyles((theme) => {
   return {
     actions: {
       display: 'flex',
@@ -19,113 +20,102 @@ const style = theme => {
     overflow: {
       overflow: 'visible',
     },
-
     container: {
       padding: 8,
-      [theme.breakpoints.up('md')]: { width: '17em' },
+      [theme.breakpoints.up('md')]: { width: '22em' },
       [theme.breakpoints.down('sm')]: { width: '100%' },
     },
     formContainer: {
       margin: 0,
     },
   }
-}
+})
 
-@withStyles(style)
-export default class FilterContainer extends React.PureComponent {
-  state = {
-    anchorEl: null,
-  }
+export default function FilterContainer(props) {
+  const classes = useStyles()
+  const [anchorEl, setAnchorEl] = useState(null)
 
-  renderContent() {
+  function renderContent() {
     return (
-      <Grid container spacing={2} className={this.props.classes.container}>
+      <Grid container spacing={2} className={classes.container}>
         <Grid
           item
           container
           xs={12}
           spacing={2}
-          className={this.props.classes.formContainer}
+          className={classes.formContainer}
         >
-          {this.props.children}
+          {props.children}
         </Grid>
-        <Grid item xs={12} className={this.props.classes.actions}>
-          {this.props.onReset && (
-            <Button onClick={this.props.onReset}>Reset</Button>
+        <Grid item xs={12} className={classes.actions}>
+          {props.onReset && (
+            <Button data-cy='filter-reset' onClick={props.onReset}>
+              Reset
+            </Button>
           )}
-          <Button
-            onClick={() =>
-              this.setState({
-                anchorEl: null,
-              })
-            }
-          >
+          <Button data-cy='filter-done' onClick={() => setAnchorEl(null)}>
             Done
           </Button>
         </Grid>
       </Grid>
     )
   }
-  render() {
-    const { classes } = this.props
-    return (
-      <React.Fragment>
-        <IconButton
-          color='inherit'
-          onClick={e =>
-            this.setState({
-              anchorEl: e.target,
-            })
-          }
-          title='filter'
-          aria-expanded={Boolean(this.state.anchorEl)}
+
+  const { icon, iconButtonProps, anchorRef } = props
+  return (
+    <React.Fragment>
+      <IconButton
+        color='inherit'
+        onClick={(e) => setAnchorEl(anchorRef ? anchorRef.current : e.target)}
+        title={props.title}
+        aria-expanded={Boolean(anchorEl)}
+        {...iconButtonProps}
+      >
+        {icon}
+      </IconButton>
+      <Hidden smDown>
+        <Popover
+          anchorEl={anchorEl}
+          classes={{
+            paper: classes.overflow,
+          }}
+          open={!!anchorEl}
+          onClose={() => setAnchorEl(null)}
         >
-          <FilterList />
-        </IconButton>
-        <Hidden smDown>
-          <Popover
-            anchorEl={this.state.anchorEl}
-            classes={{
-              paper: classes.overflow,
-            }}
-            open={!!this.state.anchorEl}
-            onClose={() =>
-              this.setState({
-                anchorEl: null,
-              })
-            }
-            anchorOrigin={{
-              vertical: 'bottom',
-              horizontal: 'right',
-            }}
-            transformOrigin={{
-              vertical: 'top',
-              horizontal: 'right',
-            }}
-          >
-            {this.renderContent()}
-          </Popover>
-        </Hidden>
-        <Hidden mdUp>
-          <SwipeableDrawer
-            anchor='top'
-            classes={{
-              paper: classes.overflow,
-            }}
-            disableDiscovery
-            disableSwipeToOpen
-            open={!!this.state.anchorEl}
-            onClose={() =>
-              this.setState({
-                anchorEl: null,
-              })
-            }
-            onOpen={() => {}}
-          >
-            {this.renderContent()}
-          </SwipeableDrawer>
-        </Hidden>
-      </React.Fragment>
-    )
-  }
+          {renderContent()}
+        </Popover>
+      </Hidden>
+      <Hidden mdUp>
+        <SwipeableDrawer
+          anchor='top'
+          classes={{
+            paper: classes.overflow,
+          }}
+          disableDiscovery
+          disableSwipeToOpen
+          open={!!anchorEl}
+          onClose={() => setAnchorEl(null)}
+          onOpen={() => {}}
+        >
+          {renderContent()}
+        </SwipeableDrawer>
+      </Hidden>
+    </React.Fragment>
+  )
+}
+
+FilterContainer.propTypes = {
+  icon: p.node,
+  // https://material-ui.com/api/icon-button/
+  iconButtonProps: p.object,
+  onReset: p.func,
+  title: p.string,
+
+  anchorRef: p.object,
+  children: p.node,
+}
+
+FilterContainer.defaultProps = {
+  icon: <FilterIcon />,
+  title: 'Filter',
 }

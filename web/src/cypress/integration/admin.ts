@@ -1,12 +1,75 @@
 import { Chance } from 'chance'
+import { testScreen, Limits, SystemLimits, Config } from '../support'
 const c = new Chance()
-import { testScreen } from '../support'
 
-testScreen('Admin', testAdmin, false, true)
+function testAdmin(): void {
+  describe('Admin System Limits Page', () => {
+    let limits: Limits = new Map()
+    beforeEach(() => {
+      cy.getLimits().then((l: Limits) => {
+        limits = l
+        return cy.visit('/admin/limits')
+      })
+    })
 
-function testAdmin(screen: ScreenFormat) {
-  let cfg: Config
-  describe('Admin Page', () => {
+    it('should allow updating system limits values', () => {
+      const newContactMethods = c.integer({ min: 15, max: 1000 }).toString()
+      const newEPActions = c.integer({ min: 15, max: 1000 }).toString()
+
+      const ContactMethodsPerUser = limits.get(
+        'ContactMethodsPerUser',
+      ) as SystemLimits
+      const EPActionsPerStep = limits.get('EPActionsPerStep') as SystemLimits
+
+      cy.form({
+        ContactMethodsPerUser: newContactMethods,
+        EPActionsPerStep: newEPActions,
+      })
+
+      cy.get('button[data-cy=save]').click()
+      cy.dialogTitle('Apply Configuration Changes?')
+
+      cy.dialogContains('-' + ContactMethodsPerUser.value)
+      cy.dialogContains('-' + EPActionsPerStep.value)
+      cy.dialogContains('+' + newContactMethods)
+      cy.dialogContains('+' + newEPActions)
+      cy.dialogFinish('Confirm')
+
+      cy.get('input[name="EPActionsPerStep"]').should(
+        'have.value',
+        newEPActions,
+      )
+      cy.get('input[name="ContactMethodsPerUser"]').should(
+        'have.value',
+        newContactMethods,
+      )
+    })
+
+    it('should reset pending system limit value changes', () => {
+      const ContactMethodsPerUser = limits.get(
+        'ContactMethodsPerUser',
+      ) as SystemLimits
+      const EPActionsPerStep = limits.get('EPActionsPerStep') as SystemLimits
+
+      cy.form({
+        ContactMethodsPerUser: c.integer({ min: 0, max: 1000 }).toString(),
+        EPActionsPerStep: c.integer({ min: 0, max: 1000 }).toString(),
+      })
+
+      cy.get('button[data-cy="reset"]').click()
+
+      cy.get('input[name="ContactMethodsPerUser"]').should(
+        'have.value',
+        ContactMethodsPerUser.value.toString(),
+      )
+      cy.get('input[name="EPActionsPerStep"]').should(
+        'have.value',
+        EPActionsPerStep.value.toString(),
+      )
+    })
+  })
+  describe('Admin Config Page', () => {
+    let cfg: Config
     beforeEach(() => {
       return cy
         .resetConfig()
@@ -16,170 +79,67 @@ function testAdmin(screen: ScreenFormat) {
             EmailDomain: '',
           },
           Twilio: {
+            Enable: true,
             AccountSID:
               'AC' + c.string({ length: 32, pool: '0123456789abcdef' }),
             AuthToken: c.string({ length: 32, pool: '0123456789abcdef' }),
             FromNumber: '+17633' + c.string({ length: 6, pool: '0123456789' }),
           },
         })
-        .then(curCfg => {
+        .then((curCfg: Config) => {
           cfg = curCfg
-          return cy.visit('/admin')
+          return cy.visit('/admin').get('button[data-cy=save]').should('exist')
         })
     })
 
-    it('should update a config value', () => {
-      const newVal = 'http://' + c.domain()
+    it('should allow updating config values', () => {
+      const newURL = 'http://' + c.domain()
+      const newDomain = c.domain()
+      const newAPIKey =
+        'key-' + c.string({ length: 32, pool: '0123456789abcdef' })
 
-      cy.get('input[name="General.PublicURL"]')
-        .clear()
-        .should('be.empty')
-        .type(newVal)
-        .should('have.value', newVal)
-      cy.get('button[data-cy="save"]').click()
+      cy.form({
+        'General.PublicURL': newURL,
+        'Mailgun.EmailDomain': newDomain,
+        'Twilio.FromNumber': '',
+        'Mailgun.APIKey': newAPIKey,
+        'Twilio.Enable': false,
+      })
+      cy.get('button[data-cy=save]').click()
 
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-General.PublicURL"] p[data-cy="old"]',
-      )
-        .should('contain', cfg.General.PublicURL)
-        .siblings('p[data-cy="new"]')
-        .should('contain', newVal)
-      cy.get('button[type="submit"]')
-        .contains('Confirm')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
+      cy.dialogTitle('Apply Configuration Changes?')
+      cy.dialogFinish('Cancel')
 
-      cy.get('input[name="General.PublicURL"]').should('have.value', newVal)
-    })
+      cy.get('button[data-cy=save]').click()
+      cy.dialogTitle('Apply Configuration Changes?')
+      cy.dialogContains('-' + cfg.General.PublicURL)
+      cy.dialogContains('-' + cfg.Twilio.FromNumber)
+      cy.dialogContains('-' + cfg.Mailgun.APIKey)
+      cy.dialogContains('-true')
+      cy.dialogContains('+false')
+      cy.dialogContains('+' + newURL)
+      cy.dialogContains('+' + newDomain)
+      cy.dialogContains('+' + newAPIKey)
+      cy.dialogFinish('Confirm')
 
-    it('should set a config value', () => {
-      const newVal = c.domain()
-
-      cy.get('input[name="Mailgun.EmailDomain"]')
-        .type(newVal)
-        .should('have.value', newVal)
-      cy.get('button[data-cy="save"]').click()
-
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Mailgun.EmailDomain"] p[data-cy="old"]',
-      ).should('not.exist')
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Mailgun.EmailDomain"] p[data-cy="new"]',
-      ).should('contain', newVal)
-      cy.get('button[type="submit"]')
-        .contains('Confirm')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
-
-      cy.get('input[name="Mailgun.EmailDomain"]').should('have.value', newVal)
-    })
-
-    it('should update multiple config values at once', () => {
-      const newVal1 = 'http://' + c.domain()
-      const newVal2 = c.domain()
-
-      cy.get('input[name="General.PublicURL"]')
-        .clear()
-        .type(newVal1)
-        .should('have.value', newVal1)
-      cy.get('input[name="Mailgun.EmailDomain"]')
-        .type(newVal2)
-        .should('have.value', newVal2)
-      cy.get('button[data-cy="save"]').click()
-
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-General.PublicURL"] p[data-cy="old"]',
-      )
-        .should('contain', cfg.General.PublicURL)
-        .siblings('p[data-cy="new"]')
-        .should('contain', newVal1)
-
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Mailgun.EmailDomain"] p[data-cy="old"]',
-      ).should('not.exist') // not set in beforeEach
-
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Mailgun.EmailDomain"] p[data-cy="new"]',
-      ).should('contain', newVal2)
-
-      cy.get('button[type="submit"]')
-        .contains('Confirm')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
-
-      cy.get('input[name="General.PublicURL"]').should('have.value', newVal1)
-      cy.get('input[name="Mailgun.EmailDomain"]').should('have.value', newVal2)
-    })
-
-    it('should delete a config value', () => {
-      cy.get('input[name="General.PublicURL"]')
-        .clear()
-        .should('be.empty')
-      cy.get('button[data-cy="save"]').click()
-
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-General.PublicURL"] p[data-cy="old"]',
-      )
-        .should('contain', cfg.General.PublicURL)
-        .siblings('p[data-cy="new"]')
-        .should('not.exist')
-      cy.get('button[type="submit"]')
-        .contains('Confirm')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
-
-      cy.get('input[name="General.PublicURL"]').should('have.value', '')
-    })
-
-    it('should cancel changing a config value', () => {
-      const newVal = c.domain()
-
-      cy.get('input[name="General.PublicURL"]')
-        .clear()
-        .should('be.empty')
-        .type(newVal)
-        .should('have.value', newVal)
-      cy.get('button[data-cy="save"]').click()
-
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-General.PublicURL"] p[data-cy="old"]',
-      )
-        .should('contain', cfg.General.PublicURL)
-        .siblings('p[data-cy="new"]')
-        .should('contain', newVal)
-      cy.get('button[type="button"]')
-        .contains('Cancel')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
-
-      // value typed in
-      cy.get('input[name="General.PublicURL"]').should('have.value', newVal)
-      // reload page
-      cy.reload()
-      // since cancelled, data should be the same as before
-      cy.get('input[name="General.PublicURL"]').should(
+      cy.get('input[name="General.PublicURL"]').should('have.value', newURL)
+      cy.get('input[name="Mailgun.EmailDomain"]').should(
         'have.value',
-        cfg.General.PublicURL,
+        newDomain,
       )
+      cy.get('input[name="Twilio.FromNumber"]').should('have.value', '')
+      cy.get('input[name="Mailgun.APIKey"]').should('have.value', newAPIKey)
+      cy.get('input[name="Twilio.Enable"]').should('not.be.checked')
     })
 
     it('should reset pending config value changes', () => {
       const domain1 = c.domain()
       const domain2 = c.domain()
 
-      cy.get('input[name="General.PublicURL"]')
-        .clear()
-        .should('be.empty')
-        .type(domain1)
-        .should('have.value', domain1)
-      cy.get('input[name="Mailgun.EmailDomain"]')
-        .type(domain2)
-        .should('have.value', domain2)
+      cy.form({
+        'General.PublicURL': domain1,
+        'Mailgun.EmailDomain': domain2,
+      })
 
       cy.get('button[data-cy="reset"]').click()
 
@@ -190,58 +150,17 @@ function testAdmin(screen: ScreenFormat) {
       cy.get('input[name="Mailgun.EmailDomain"]').should('have.value', '')
     })
 
-    it('should update a boolean toggle field', () => {
-      cy.get('input[name="Twilio.Enable"]').click()
-      cy.get('button[data-cy="save"]').click()
-
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Twilio.Enable"] p[data-cy="old"]',
-      )
-        .should('contain', 'false')
-        .siblings('p[data-cy="new"]')
-        .should('contain', 'true')
-      cy.get('button[type="submit"]')
-        .contains('Confirm')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
-
-      cy.get('input[name="Twilio.Enable"]').should('have.value', 'true')
-    })
-
     it('should update a string list field', () => {
       const domain1 = 'http://' + c.domain()
       const domain2 = 'http://' + c.domain()
       const domain3 = cfg.General.PublicURL
 
-      cy.get('input[name="Auth.RefererURLs-new-item"]')
-        .clear()
-        .should('be.empty')
-        .type(domain1)
-        .should('have.value', domain1)
-      cy.get('input[name="Auth.RefererURLs-new-item"]')
-        .clear()
-        .should('be.empty')
-        .type(domain2)
-        .should('have.value', domain2)
-      cy.get('input[name="Auth.RefererURLs-new-item"]')
-        .clear()
-        .should('be.empty')
-        .type(domain3)
-        .should('have.value', domain3)
-      cy.get('button[data-cy="save"]').click()
+      cy.form({ 'Auth.RefererURLs-new-item': domain1 })
+      cy.form({ 'Auth.RefererURLs-new-item': domain2 })
+      cy.form({ 'Auth.RefererURLs-new-item': domain3 })
 
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Auth.RefererURLs"] p[data-cy="old"]',
-      ).should('not.exist')
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Auth.RefererURLs"] p[data-cy="new"]',
-      ).should('contain', `${domain1}, ${domain2}, ${domain3}`)
-      cy.get('button[type="submit"]')
-        .contains('Confirm')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
+      cy.get('button[data-cy=save]').click()
+      cy.dialogFinish('Confirm')
 
       cy.get('input[name="Auth.RefererURLs-0"]').should('have.value', domain1)
       cy.get('input[name="Auth.RefererURLs-1"]').should('have.value', domain2)
@@ -249,29 +168,33 @@ function testAdmin(screen: ScreenFormat) {
       cy.get('input[name="Auth.RefererURLs-new-item"]').should('have.value', '')
     })
 
-    it('should update a password field', () => {
-      const newKey = 'key-' + c.string({ length: 32, pool: '0123456789abcdef' })
+    it('should generate a slack manifest', () => {
+      const publicURL = cfg.General.PublicURL
+      cy.get('[id="accordion-Slack"]').click()
+      cy.get('button').contains('Create New Slack App').click()
+      cy.dialogTitle('Create New Slack App')
 
-      cy.get('input[name="Mailgun.APIKey"]')
-        .clear()
-        .should('be.empty')
-        .type(newKey)
-        .should('have.value', newKey)
-      cy.get('button[data-cy="save"]').click()
-
-      // save dialog
-      cy.get(
-        'ul[data-cy="confirmation-diff"] li[data-cy="diff-Mailgun.APIKey"] p[data-cy="old"]',
+      // verify data integrity from pulled values
+      cy.dialogContains("name: 'GoAlert'")
+      cy.dialogContains(
+        `request_url: '${publicURL}/api/v2/slack/message-action'`,
       )
-        .should('contain', cfg.Mailgun.APIKey)
-        .siblings('p[data-cy="new"]')
-        .should('contain', newKey)
-      cy.get('button[type="submit"]')
-        .contains('Confirm')
-        .click()
-      cy.get('div[role="document"]').should('not.exist') // dialog should close
+      cy.dialogContains(
+        `message_menu_options_url: '${publicURL}/api/v2/slack/menu-options'`,
+      )
+      cy.dialogContains(
+        `'${publicURL}/api/v2/identity/providers/oidc/callback'`,
+      )
+      cy.dialogContains("display_name: 'GoAlert'")
 
-      cy.get('input[name="Mailgun.APIKey"]').should('have.value', newKey)
+      // verify button routing to slack config page
+      cy.get('[data-cy="configure-in-slack"]').should(
+        'have.attr',
+        'href',
+        'https://api.slack.com/apps',
+      )
     })
   })
 }
+
+testScreen('Admin', testAdmin, false, true)

@@ -3,6 +3,7 @@ package rule
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/permission"
@@ -10,7 +11,7 @@ import (
 	"github.com/target/goalert/util/sqlutil"
 	"github.com/target/goalert/validation/validate"
 
-	uuid "github.com/satori/go.uuid"
+	"github.com/google/uuid"
 )
 
 type Store interface {
@@ -234,7 +235,7 @@ func (db *DB) _Add(ctx context.Context, s *sql.Stmt, r *Rule) (*Rule, error) {
 		return nil, err
 	}
 
-	n.ID = uuid.NewV4().String()
+	n.ID = uuid.New().String()
 	_, err = s.ExecContext(ctx, n.readFields()...)
 	if err != nil {
 		return nil, err
@@ -252,6 +253,9 @@ func (db *DB) Add(ctx context.Context, r *Rule) (*Rule, error) {
 }
 
 func (db *DB) CreateRuleTx(ctx context.Context, tx *sql.Tx, r *Rule) (*Rule, error) {
+	if tx == nil {
+		return db._Add(ctx, db.add, r)
+	}
 	return db._Add(ctx, tx.Stmt(db.add), r)
 }
 
@@ -285,7 +289,7 @@ func (db *DB) FindByTargetTx(ctx context.Context, tx *sql.Tx, scheduleID string,
 	}
 
 	rows, err := stmt.QueryContext(ctx, scheduleID, tgtUser, tgtRot)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

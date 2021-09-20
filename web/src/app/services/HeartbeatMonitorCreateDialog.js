@@ -1,15 +1,13 @@
 import React, { useState } from 'react'
+import { useMutation, gql } from '@apollo/client'
 import p from 'prop-types'
-import gql from 'graphql-tag'
 import { fieldErrors, nonFieldErrors } from '../util/errutil'
 
 import FormDialog from '../dialogs/FormDialog'
 import HeartbeatMonitorForm from './HeartbeatMonitorForm'
 
-import { useMutation } from '@apollo/react-hooks'
-
 const createMutation = gql`
-  mutation($input: CreateHeartbeatMonitorInput!) {
+  mutation ($input: CreateHeartbeatMonitorInput!) {
     createHeartbeatMonitor(input: $input) {
       id
     }
@@ -19,7 +17,6 @@ const createMutation = gql`
 export default function HeartbeatMonitorCreateDialog(props) {
   const [value, setValue] = useState({ name: '', timeoutMinutes: 15 })
   const [createHeartbeat, { loading, error }] = useMutation(createMutation, {
-    refetchQueries: props.refetchQueries,
     variables: {
       input: {
         name: value.name,
@@ -39,13 +36,13 @@ export default function HeartbeatMonitorCreateDialog(props) {
       onSubmit={() => createHeartbeat().then(props.onClose)}
       form={
         <HeartbeatMonitorForm
-          errors={fieldErrors(error).map(f => ({
+          errors={fieldErrors(error).map((f) => ({
             ...f,
             field: f.field === 'timeout' ? 'timeoutMinutes' : f.field,
           }))}
           disabled={loading}
           value={value}
-          onChange={value => setValue(value)}
+          onChange={(value) => setValue(value)}
         />
       }
     />
@@ -55,5 +52,4 @@ export default function HeartbeatMonitorCreateDialog(props) {
 HeartbeatMonitorCreateDialog.propTypes = {
   serviceID: p.string.isRequired,
   onClose: p.func,
-  refetchQueries: p.arrayOf(p.string),
 }

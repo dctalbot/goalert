@@ -16,8 +16,8 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v4/stdlib" // import db driver
-	uuid "github.com/satori/go.uuid"
 	"github.com/target/goalert/migrate"
 	"github.com/target/goalert/smoketest/harness"
 	"github.com/target/goalert/util/sqlutil"
@@ -447,12 +447,11 @@ func randStringRunes(n int) string {
 func renderQuery(t *testing.T, sql string) string {
 	tmpl := template.New("sql")
 	uuidG := harness.NewDataGen(t, "UUID", harness.DataGenFunc(harness.GenUUID))
-	phoneG := harness.NewDataGen(t, "Phone", harness.DataGenFunc(harness.GenPhone))
-	phoneCCG := harness.NewDataGen(t, "PhoneCC", harness.DataGenArgFunc(harness.GenPhoneCC))
+	phoneCCG := harness.NewDataGen(t, "Phone", harness.DataGenArgFunc(harness.GenPhoneCC))
 	strs := make(map[string]bool)
 	tmpl.Funcs(template.FuncMap{
 		"uuid":    func(id string) string { return fmt.Sprintf("'%s'", uuidG.Get(id)) },
-		"phone":   func(id string) string { return fmt.Sprintf("'%s'", phoneG.Get(id)) },
+		"phone":   func(id string) string { return fmt.Sprintf("'%s'", phoneCCG.Get(id)) },
 		"phoneCC": func(cc, id string) string { return fmt.Sprintf("'%s'", phoneCCG.GetWithArg(cc, id)) },
 		"text": func(n int) string {
 			val := randStringRunes(n)
@@ -538,7 +537,7 @@ func TestMigrations(t *testing.T) {
 		t.Fatal("failed to open db:", err)
 	}
 	defer db.Close()
-	dbName := strings.Replace("migrations_smoketest_"+time.Now().Format("2006_01_02_03_04_05")+uuid.NewV4().String(), "-", "", -1)
+	dbName := strings.Replace("migrations_smoketest_"+time.Now().Format("2006_01_02_03_04_05")+uuid.New().String(), "-", "", -1)
 
 	_, err = db.Exec("create database " + sqlutil.QuoteID(dbName))
 	if err != nil {
@@ -577,7 +576,7 @@ func TestMigrations(t *testing.T) {
 
 	names = names[idx:]
 	if skipTo {
-		n, err := migrate.Up(context.Background(), harness.DBURL(dbName), env)
+		n, err := migrate.Up(context.Background(), harness.DBURL(dbName), start)
 		if err != nil {
 			t.Fatal("failed to apply skip migrations:", err)
 		}
@@ -632,12 +631,12 @@ func TestMigrations(t *testing.T) {
 		mm++
 		return mismatch
 	}
+	names = names[1:]
 	for i, migrationName := range names[1:] {
 		lastMigrationName := names[i]
 		var applied bool
 		pass := t.Run(migrationName, func(t *testing.T) {
 			ctx := context.Background()
-
 			orig := snapshot(t, migrationName)
 			n, err = migrate.Up(ctx, harness.DBURL(dbName), migrationName)
 			if err != nil {

@@ -3,13 +3,13 @@ package resolver
 import (
 	"context"
 	"database/sql"
+
+	"github.com/pkg/errors"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/schedule"
 	"github.com/target/goalert/schedule/rule"
 	"github.com/target/goalert/util"
 	"github.com/target/goalert/validation/validate"
-
-	"github.com/pkg/errors"
 )
 
 type Resolver interface {
@@ -48,10 +48,10 @@ type DB struct {
 	onCallDirectAssignments          *sql.Stmt
 
 	rules rule.Store
-	sched schedule.Store
+	sched *schedule.Store
 }
 
-func NewDB(ctx context.Context, db *sql.DB, rules rule.Store, sched schedule.Store) (*DB, error) {
+func NewDB(ctx context.Context, db *sql.DB, rules rule.Store, sched *schedule.Store) (*DB, error) {
 	p := &util.Prepare{DB: db, Ctx: ctx}
 	return &DB{
 		db: db,
@@ -254,7 +254,7 @@ func (db *DB) IsUserOnCall(ctx context.Context, userID string) (bool, error) {
 	}
 	var result int
 	err = db.isOnCall.QueryRowContext(ctx, userID).Scan(&result)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {

@@ -3,18 +3,20 @@ package integrationkey
 import (
 	"context"
 	"database/sql"
+
+	"github.com/target/goalert/auth/authtoken"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/util"
 	"github.com/target/goalert/util/sqlutil"
 	"github.com/target/goalert/validation"
 	"github.com/target/goalert/validation/validate"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 )
 
 type Store interface {
-	Authorize(ctx context.Context, id string, integrationType Type) (context.Context, error)
+	Authorize(ctx context.Context, tok authtoken.Token, integrationType Type) (context.Context, error)
 	GetServiceID(ctx context.Context, id string, integrationType Type) (string, error)
 	Create(ctx context.Context, i *IntegrationKey) (*IntegrationKey, error)
 	CreateKeyTx(context.Context, *sql.Tx, *IntegrationKey) (*IntegrationKey, error)
@@ -49,13 +51,13 @@ func NewDB(ctx context.Context, db *sql.DB) (*DB, error) {
 	}, p.Err
 }
 
-func (db *DB) Authorize(ctx context.Context, id string, t Type) (context.Context, error) {
+func (db *DB) Authorize(ctx context.Context, tok authtoken.Token, t Type) (context.Context, error) {
 	var serviceID string
 	var err error
 	permission.SudoContext(ctx, func(c context.Context) {
-		serviceID, err = db.GetServiceID(c, id, t)
+		serviceID, err = db.GetServiceID(c, tok.ID.String(), t)
 	})
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return ctx, validation.NewFieldError("IntegrationKeyID", "not found")
 	}
 	if err != nil {
@@ -63,7 +65,7 @@ func (db *DB) Authorize(ctx context.Context, id string, t Type) (context.Context
 	}
 	ctx = permission.ServiceSourceContext(ctx, serviceID, &permission.SourceInfo{
 		Type: permission.SourceTypeIntegrationKey,
-		ID:   id,
+		ID:   tok.ID.String(),
 	})
 	return ctx, nil
 }
@@ -71,7 +73,7 @@ func (db *DB) Authorize(ctx context.Context, id string, t Type) (context.Context
 func (db *DB) GetServiceID(ctx context.Context, id string, t Type) (string, error) {
 	err := validate.Many(
 		validate.UUID("IntegrationKeyID", id),
-		validate.OneOf("IntegrationType", t, TypeGrafana, TypeSite24x7, TypeGeneric, TypeEmail),
+		validate.OneOf("IntegrationType", t, TypeGrafana, TypeSite24x7, TypePrometheusAlertmanager, TypeGeneric, TypeEmail),
 	)
 	if err != nil {
 		return "", err
@@ -85,7 +87,7 @@ func (db *DB) GetServiceID(ctx context.Context, id string, t Type) (string, erro
 
 	var serviceID string
 	err = row.Scan(&serviceID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
 	if err != nil {
@@ -115,7 +117,7 @@ func (db *DB) CreateKeyTx(ctx context.Context, tx *sql.Tx, i *IntegrationKey) (*
 		stmt = tx.Stmt(stmt)
 	}
 
-	n.ID = uuid.NewV4().String()
+	n.ID = uuid.New().String()
 	_, err = stmt.ExecContext(ctx, n.ID, n.Name, n.Type, n.ServiceID)
 	if err != nil {
 		return nil, err
@@ -161,6 +163,9 @@ func (db *DB) FindOne(ctx context.Context, id string) (*IntegrationKey, error) {
 	row := db.findOne.QueryRowContext(ctx, id)
 	var i IntegrationKey
 	err = scanFrom(&i, row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

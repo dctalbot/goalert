@@ -1,9 +1,10 @@
 package smoketest
 
 import (
-	"github.com/target/goalert/smoketest/harness"
 	"testing"
 	"time"
+
+	"github.com/target/goalert/smoketest/harness"
 )
 
 // TestInProgress ensures that sent and in-progress notifications for triggered alerts are honored through the migration.
@@ -29,19 +30,19 @@ func TestInProgress(t *testing.T) {
         ({{uuid ""}},{{uuid "u1"}}, {{uuid "c1"}}, 0),
         ({{uuid ""}},{{uuid "u2"}}, {{uuid "c2"}}, 0),
         ({{uuid ""}},{{uuid "u3"}}, {{uuid "c3"}}, 0),
-        ({{uuid ""}},{{uuid "u1"}}, {{uuid "c1"}}, 1),
-        ({{uuid ""}},{{uuid "u2"}}, {{uuid "c2"}}, 1),
-        ({{uuid ""}},{{uuid "u2"}}, {{uuid "c2_2"}}, 1),
-        ({{uuid ""}},{{uuid "u3"}}, {{uuid "c3"}}, 1);
+        ({{uuid ""}},{{uuid "u1"}}, {{uuid "c1"}}, 30),
+        ({{uuid ""}},{{uuid "u2"}}, {{uuid "c2"}}, 30),
+        ({{uuid ""}},{{uuid "u2"}}, {{uuid "c2_2"}}, 30),
+        ({{uuid ""}},{{uuid "u3"}}, {{uuid "c3"}}, 30);
 
     insert into escalation_policies (id, name, repeat) 
     values 
         ({{uuid "eid"}}, 'esc policy', -1);
     insert into escalation_policy_steps (id, escalation_policy_id, delay) 
     values 
-        ({{uuid "esid1"}}, {{uuid "eid"}}, 60),
-        ({{uuid "esid2"}}, {{uuid "eid"}}, 60),
-        ({{uuid "esid3"}}, {{uuid "eid"}}, 60);
+        ({{uuid "esid1"}}, {{uuid "eid"}}, 300),
+        ({{uuid "esid2"}}, {{uuid "eid"}}, 300),
+        ({{uuid "esid3"}}, {{uuid "eid"}}, 300);
 
     insert into escalation_policy_actions (escalation_policy_step_id, user_id) 
     values
@@ -67,13 +68,13 @@ func TestInProgress(t *testing.T) {
     insert into notification_policy_cycles (alert_id, user_id, last_tick)
     values
         (1, {{uuid "u1"}}, null),
-        (1, {{uuid "u2"}}, now() + '5 minutes'::interval),
+        (1, {{uuid "u2"}}, now() + '35 minutes'::interval),
         (1, {{uuid "u3"}}, now() + '1 second'::interval);
 `
 	h := harness.NewHarness(t, sql, "UserFavorites")
 	defer h.Close()
 
-	tw := h.Twilio()
+	tw := h.Twilio(t)
 	d1 := tw.Device(h.Phone("1"))
 	d2 := tw.Device(h.Phone("2"))
 	d3 := tw.Device(h.Phone("3"))
@@ -85,9 +86,7 @@ func TestInProgress(t *testing.T) {
 
 	d3.ExpectSMS("testing2")
 
-	tw.WaitAndAssert()
-
-	h.FastForward(time.Minute)
+	h.FastForward(30 * time.Minute)
 
 	d1.ExpectSMS("testing1")
 	d1.ExpectSMS("testing2")
@@ -98,16 +97,12 @@ func TestInProgress(t *testing.T) {
 	d3.ExpectSMS("testing1")
 	d3.ExpectSMS("testing2")
 
-	tw.WaitAndAssert()
-
 	h.Escalate(1, 0)
 
 	d2.ExpectSMS("testing1")
-	tw.WaitAndAssert()
 
-	h.FastForward(time.Minute)
+	h.FastForward(30 * time.Minute)
 
 	d2.ExpectSMS("testing1")
 	d2.ExpectVoice("testing1")
-	tw.WaitAndAssert()
 }

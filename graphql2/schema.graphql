@@ -1,4 +1,6 @@
 type Query {
+  phoneNumberInfo(number: String!): PhoneNumberInfo
+
   # Returns the user with the given ID. If no ID is specified,
   # the current user is implied.
   user(id: ID): User
@@ -35,8 +37,15 @@ type Query {
   # Returns a paginated list of rotations.
   rotations(input: RotationSearchOptions): RotationConnection!
 
+  calcRotationHandoffTimes(
+    input: CalcRotationHandoffTimesInput
+  ): [ISOTimestamp!]!
+
   # Returns a single schedule with the given ID.
   schedule(id: ID!): Schedule
+
+  # Returns the public information of a calendar subscription
+  userCalendarSubscription(id: ID!): UserCalendarSubscription
 
   # Returns a paginated list of schedules.
   schedules(input: ScheduleSearchOptions): ScheduleConnection!
@@ -62,6 +71,12 @@ type Query {
   # Allows searching for assigned labels.
   labels(input: LabelSearchOptions): LabelConnection!
 
+  # Allows searching for label keys.
+  labelKeys(input: LabelKeySearchOptions): StringConnection!
+
+  # Allows searching for label values.
+  labelValues(input: LabelValueSearchOptions): StringConnection!
+
   # Allows searching for user overrides.
   userOverrides(input: UserOverrideSearchOptions): UserOverrideConnection!
 
@@ -72,6 +87,12 @@ type Query {
   # then all values are returned (must be admin).
   config(all: Boolean): [ConfigValue!]!
 
+  # Returns configuration hints (must be admin).
+  configHints: [ConfigHint!]!
+
+  # Returns configuration limits
+  systemLimits: [SystemLimit!]!
+
   # Returns a contact method with the given ID.
   userContactMethod(id: ID!): UserContactMethod
 
@@ -80,6 +101,8 @@ type Query {
 
   # Returns a Slack channel with the given ID.
   slackChannel(id: ID!): SlackChannel
+
+  generateSlackAppManifest: String!
 }
 
 input SlackChannelSearchOptions {
@@ -92,11 +115,23 @@ input SlackChannelSearchOptions {
 type SlackChannel {
   id: ID!
   name: String!
+  teamID: String!
 }
 
 type SlackChannelConnection {
   nodes: [SlackChannel!]!
   pageInfo: PageInfo!
+}
+
+type SystemLimit {
+  id: SystemLimitID!
+  description: String!
+  value: Int!
+}
+
+input SystemLimitInput {
+  id: SystemLimitID!
+  value: Int!
 }
 
 type ConfigValue {
@@ -106,11 +141,29 @@ type ConfigValue {
   type: ConfigType!
   password: Boolean!
 }
+type ConfigHint {
+  id: String!
+  value: String!
+}
 enum ConfigType {
   string
   stringList
   integer
   boolean
+}
+enum SystemLimitID {
+  CalendarSubscriptionsPerUser
+  NotificationRulesPerUser
+  ContactMethodsPerUser
+  EPStepsPerPolicy
+  EPActionsPerStep
+  ParticipantsPerRotation
+  RulesPerSchedule
+  IntegrationKeysPerService
+  UnackedAlertsPerService
+  TargetsPerSchedule
+  HeartbeatMonitorsPerService
+  UserOverridesPerSchedule
 }
 
 input UserOverrideSearchOptions {
@@ -152,14 +205,103 @@ input LabelSearchOptions {
   omit: [ID!]
 }
 
+input LabelKeySearchOptions {
+  first: Int = 15
+  after: String = ""
+  search: String = ""
+  omit: [String!]
+}
+
+input LabelValueSearchOptions {
+  key: String!
+  first: Int = 15
+  after: String = ""
+  search: String = ""
+  omit: [String!]
+}
+
 type LabelConnection {
   nodes: [Label!]!
   pageInfo: PageInfo!
 }
 
+type StringConnection {
+  nodes: [String!]!
+  pageInfo: PageInfo!
+}
+
+type PhoneNumberInfo {
+  id: String!
+  countryCode: String!
+  regionCode: String!
+  formatted: String!
+  valid: Boolean!
+  error: String!
+}
+
+type DebugCarrierInfo {
+  name: String!
+  type: String!
+  mobileNetworkCode: String!
+  mobileCountryCode: String!
+}
+
+input DebugCarrierInfoInput {
+  number: String!
+}
+
+input DebugSendSMSInput {
+  from: String!
+  to: String!
+  body: String!
+}
+
+type DebugSendSMSInfo {
+  id: ID!
+  providerURL: String!
+  fromNumber: String!
+}
+
+type TemporarySchedule {
+  start: ISOTimestamp!
+  end: ISOTimestamp!
+
+  shifts: [OnCallShift!]!
+}
+
+input ClearTemporarySchedulesInput {
+  scheduleID: ID!
+
+  start: ISOTimestamp!
+  end: ISOTimestamp!
+}
+input SetTemporaryScheduleInput {
+  scheduleID: ID!
+
+  start: ISOTimestamp!
+  end: ISOTimestamp!
+
+  shifts: [SetScheduleShiftInput!]!
+}
+input SetScheduleShiftInput {
+  userID: ID!
+  start: ISOTimestamp!
+  end: ISOTimestamp!
+}
+
 type Mutation {
+  setTemporarySchedule(input: SetTemporaryScheduleInput!): Boolean!
+  clearTemporarySchedules(input: ClearTemporarySchedulesInput!): Boolean!
+
+  setScheduleOnCallNotificationRules(
+    input: SetScheduleOnCallNotificationRulesInput!
+  ): Boolean!
+
+  debugCarrierInfo(input: DebugCarrierInfoInput!): DebugCarrierInfo!
+  debugSendSMS(input: DebugSendSMSInput!): DebugSendSMSInfo
   addAuthSubject(input: AuthSubjectInput!): Boolean!
   deleteAuthSubject(input: AuthSubjectInput!): Boolean!
+  endAllAuthSessionsByCurrentUser: Boolean!
   updateUser(input: UpdateUserInput!): Boolean!
 
   testContactMethod(id: ID!): Boolean!
@@ -198,6 +340,16 @@ type Mutation {
   setLabel(input: SetLabelInput!): Boolean!
 
   createSchedule(input: CreateScheduleInput!): Schedule
+
+  createUser(input: CreateUserInput!): User
+
+  createUserCalendarSubscription(
+    input: CreateUserCalendarSubscriptionInput!
+  ): UserCalendarSubscription!
+  updateUserCalendarSubscription(
+    input: UpdateUserCalendarSubscriptionInput!
+  ): Boolean!
+
   updateScheduleTarget(input: ScheduleTargetInput!): Boolean!
   createUserOverride(input: CreateUserOverrideInput!): UserOverride
 
@@ -217,13 +369,55 @@ type Mutation {
   updateUserOverride(input: UpdateUserOverrideInput!): Boolean!
   updateHeartbeatMonitor(input: UpdateHeartbeatMonitorInput!): Boolean!
 
+  updateAlertsByService(input: UpdateAlertsByServiceInput!): Boolean!
+
   setConfig(input: [ConfigValueInput!]): Boolean!
+  setSystemLimits(input: [SystemLimitInput!]!): Boolean!
+}
+
+input UpdateAlertsByServiceInput {
+  serviceID: ID!
+  newStatus: AlertStatus!
 }
 
 input CreateAlertInput {
   summary: String!
   details: String
   serviceID: ID!
+  sanitize: Boolean
+}
+
+input CreateUserInput {
+  username: String!
+  password: String!
+  name: String
+  email: String
+  role: UserRole
+}
+
+input CreateUserCalendarSubscriptionInput {
+  name: String!
+  reminderMinutes: [Int!]
+  scheduleID: ID!
+  disabled: Boolean
+}
+input UpdateUserCalendarSubscriptionInput {
+  id: ID!
+  name: String
+  reminderMinutes: [Int!]
+  disabled: Boolean
+}
+type UserCalendarSubscription {
+  id: ID!
+  name: String!
+  reminderMinutes: [Int!]!
+  scheduleID: ID!
+  schedule: Schedule
+  lastAccess: ISOTimestamp!
+  disabled: Boolean!
+
+  # Subscription url, only available upon creation.
+  url: String
 }
 
 input ConfigValueInput {
@@ -242,7 +436,7 @@ input UpdateUserOverrideInput {
 }
 
 input CreateUserOverrideInput {
-  scheduleID: ID!
+  scheduleID: ID
 
   start: ISOTimestamp!
   end: ISOTimestamp!
@@ -258,6 +452,7 @@ input CreateScheduleInput {
   favorite: Boolean
 
   targets: [ScheduleTargetInput!]
+  newUserOverrides: [CreateUserOverrideInput!]
 }
 
 input ScheduleTargetInput {
@@ -268,13 +463,13 @@ input ScheduleTargetInput {
 }
 
 input ScheduleRuleInput {
-  id: ID
+  id: ID @deprecated(reason: "ignored")
   start: ClockTime
   end: ClockTime
 
   # weekdayFilter is a 7-item array that indicates if the rule
   # is active on each weekday, starting with Sunday.
-  weekdayFilter: [Boolean!]
+  weekdayFilter: WeekdayFilter
 }
 
 input SetLabelInput {
@@ -318,6 +513,8 @@ input CreateEscalationPolicyInput {
   name: String!
   description: String = ""
   repeat: Int = 3
+
+  favorite: Boolean
 
   steps: [CreateEscalationPolicyStepInput!]
 }
@@ -400,6 +597,38 @@ type Schedule {
   targets: [ScheduleTarget!]!
   target(input: TargetInput!): ScheduleTarget
   isFavorite: Boolean!
+
+  temporarySchedules: [TemporarySchedule!]!
+  onCallNotificationRules: [OnCallNotificationRule!]!
+}
+
+input SetScheduleOnCallNotificationRulesInput {
+  scheduleID: ID!
+  rules: [OnCallNotificationRuleInput!]!
+}
+
+input OnCallNotificationRuleInput {
+  id: ID
+  target: TargetInput!
+
+  # time indicates a time-of-day (in the schedule's time zone)
+  # to send a message of current on-call users.
+  #
+  # If time is null, a notification will be sent any time the set of on-call users
+  # changes for this schedule.
+  time: ClockTime
+
+  # weekdayFilter indicates which days of the week this rule is evaluated.
+  #
+  # It is required for time-of-day notifications and must be null if time is null.
+  weekdayFilter: WeekdayFilter
+}
+
+type OnCallNotificationRule {
+  id: ID!
+  target: Target!
+  time: ClockTime
+  weekdayFilter: WeekdayFilter
 }
 
 type OnCallShift {
@@ -417,7 +646,7 @@ type ScheduleTarget {
 }
 
 type ScheduleRule {
-  id: ID!
+  id: ID! @deprecated(reason: "no longer used")
   scheduleID: ID!
 
   start: ClockTime!
@@ -425,7 +654,7 @@ type ScheduleRule {
 
   # weekdayFilter is a 7-item array that indicates if the rule
   # is active on each weekday, starting with Sunday.
-  weekdayFilter: [Boolean!]!
+  weekdayFilter: WeekdayFilter!
 
   target: Target!
 }
@@ -512,11 +741,25 @@ input RotationSearchOptions {
   favoritesFirst: Boolean = false
 }
 
+input CalcRotationHandoffTimesInput {
+  handoff: ISOTimestamp!
+  from: ISOTimestamp
+  timeZone: String!
+  shiftLengthHours: Int!
+  count: Int!
+}
+
 input EscalationPolicySearchOptions {
   first: Int = 15
   after: String = ""
   search: String = ""
   omit: [ID!]
+
+  # Include only favorited escalaton policies in the results.
+  favoritesOnly: Boolean = false
+
+  # Sort favorite escalation policies first.
+  favoritesFirst: Boolean = false
 }
 
 input ScheduleSearchOptions {
@@ -550,6 +793,8 @@ input UserSearchOptions {
   after: String = ""
   search: String = ""
   omit: [ID!]
+  CMValue: String = ""
+  CMType: ContactMethodType
 }
 
 input AlertSearchOptions {
@@ -559,14 +804,28 @@ input AlertSearchOptions {
   first: Int = 15
   after: String = ""
   favoritesOnly: Boolean = false
+  includeNotified: Boolean = false
   omit: [Int!]
+  sort: AlertSearchSort = statusID
+  createdBefore: ISOTimestamp
+  notCreatedBefore: ISOTimestamp
+}
+
+enum AlertSearchSort {
+  statusID
+  dateID
+  dateIDReverse
 }
 
 # An ISOTimestamp is an RFC3339-formatted timestamp string.
 scalar ISOTimestamp
 
-# ClockTime is a 24-hour time in the format 00:00
+# ClockTime is a 24-hour time in the format 00:00.
 scalar ClockTime
+
+# WeekdayFilter is an array of 7 true/false values representing days of the week.
+# The first index (0) represents Sunday.
+scalar WeekdayFilter
 
 type Alert {
   id: ID!
@@ -599,6 +858,19 @@ type AlertLogEntry {
   id: Int!
   timestamp: ISOTimestamp!
   message: String!
+  state: NotificationState
+}
+
+type NotificationState {
+  details: String!
+  status: NotificationStatus
+  formattedSrcValue: String!
+}
+
+enum NotificationStatus {
+  OK
+  WARN
+  ERROR
 }
 
 # The escalation policy state details for the alert.
@@ -673,6 +945,7 @@ enum IntegrationKeyType {
   generic
   grafana
   site24x7
+  prometheusAlertmanager
   email
 }
 
@@ -687,9 +960,12 @@ type EscalationPolicy {
   name: String!
   description: String!
   repeat: Int!
+  isFavorite: Boolean!
 
   assignedTo: [Target!]!
   steps: [EscalationPolicyStep!]!
+
+  notices: [Notice!]!
 }
 
 # Different Alert Status.
@@ -724,6 +1000,8 @@ enum TargetType {
   notificationRule
   contactMethod
   heartbeatMonitor
+  calendarSubscription
+  userSession
 }
 
 type ServiceConnection {
@@ -780,12 +1058,22 @@ type User {
 
   contactMethods: [UserContactMethod!]!
   notificationRules: [UserNotificationRule!]!
+  calendarSubscriptions: [UserCalendarSubscription!]!
 
   statusUpdateContactMethodID: ID!
 
   authSubjects: [AuthSubject!]!
+  sessions: [UserSession!]!
 
   onCallSteps: [EscalationPolicyStep!]!
+}
+
+type UserSession {
+  id: ID!
+  current: Boolean!
+  userAgent: String!
+  createdAt: ISOTimestamp!
+  lastAccessAt: ISOTimestamp!
 }
 
 type UserNotificationRule {
@@ -799,6 +1087,8 @@ type UserNotificationRule {
 enum ContactMethodType {
   SMS
   VOICE
+  EMAIL
+  WEBHOOK
 }
 
 # A method of contacting a user.
@@ -811,6 +1101,10 @@ type UserContactMethod {
   value: String!
   formattedValue: String!
   disabled: Boolean!
+
+  lastTestVerifyAt: ISOTimestamp
+  lastTestMessageState: NotificationState
+  lastVerifyMessageState: NotificationState
 }
 
 input CreateUserContactMethodInput {
@@ -848,4 +1142,16 @@ type AuthSubject {
   providerID: ID!
   subjectID: ID!
   userID: ID!
+}
+
+type Notice {
+  type: NoticeType!
+  message: String!
+  details: String!
+}
+
+enum NoticeType {
+  WARNING
+  ERROR
+  INFO
 }

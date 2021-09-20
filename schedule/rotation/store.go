@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"sort"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 	"github.com/target/goalert/assignment"
 	"github.com/target/goalert/permission"
 	"github.com/target/goalert/util"
@@ -104,7 +104,6 @@ type DB struct {
 	rmState   *sql.Stmt
 	partRotID *sql.Stmt
 
-	addParticipants         *sql.Stmt
 	deleteParticipants      *sql.Stmt
 	updateParticipantUserID *sql.Stmt
 	setActiveIndex          *sql.Stmt
@@ -118,8 +117,15 @@ func NewDB(ctx context.Context, db *sql.DB) (*DB, error) {
 	return &DB{
 		db: db,
 
-		createRotation:   p.P(`INSERT INTO rotations (id, name, description, type, start_time, shift_length, time_zone) VALUES ($1, $2, $3, $4, $5, $6, $7)`),
-		updateRotation:   p.P(`UPDATE rotations SET name = $2, description = $3, type = $4, start_time = $5, shift_length = $6, time_zone = $7 WHERE id = $1`),
+		createRotation: p.P(`INSERT INTO rotations (id, name, description, type, start_time, shift_length, time_zone) VALUES ($1, $2, $3, $4, $5, $6, $7)`),
+		updateRotation: p.P(`
+			WITH set_shift_start AS (
+				UPDATE rotation_state
+				SET shift_start = now()
+				WHERE rotation_id = $1
+			)
+			UPDATE rotations SET name = $2, description = $3, type = $4, start_time = $5, shift_length = $6, time_zone = $7 WHERE id = $1
+		`),
 		findAllRotations: p.P(`SELECT id, name, description, type, start_time, shift_length, time_zone FROM rotations`),
 		findRotation: p.P(`
 			SELECT 
@@ -249,10 +255,6 @@ func NewDB(ctx context.Context, db *sql.DB) (*DB, error) {
 			DELETE FROM rotation_state WHERE rotation_id = $1
 		`),
 
-		addParticipants: p.P(`
-			INSERT INTO rotation_participants (rotation_id, user_id) SELECT $1, unnest FROM unnest($2::UUID[])
-		`),
-
 		deleteParticipants: p.P(`
 			DELETE FROM rotation_participants WHERE id = ANY($1)
 		`),
@@ -280,7 +282,7 @@ func (db *DB) FindAllRotationsByScheduleID(ctx context.Context, schedID string) 
 		return nil, err
 	}
 	rows, err := db.findAllBySched.QueryContext(ctx, schedID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -317,7 +319,7 @@ func (db *DB) IsParticipantActive(ctx context.Context, partID string) (bool, err
 	}
 	var n int
 	err = db.participantActive.QueryRowContext(ctx, partID).Scan(&n)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -347,7 +349,7 @@ func (db *DB) StateTx(ctx context.Context, tx *sql.Tx, id string) (*State, error
 	var s State
 	var part sql.NullString
 	err = row.Scan(&s.Position, &part, &s.ShiftStart)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoState
 	}
 	if err != nil {
@@ -370,7 +372,7 @@ func (db *DB) FindAllStateByScheduleID(ctx context.Context, scheduleID string) (
 	}
 
 	rows, err := db.findAllStateBySched.QueryContext(ctx, scheduleID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -413,7 +415,7 @@ func (db *DB) CreateRotationTx(ctx context.Context, tx *sql.Tx, r *Rotation) (*R
 		stmt = tx.Stmt(stmt)
 	}
 
-	n.ID = uuid.NewV4().String()
+	n.ID = uuid.New().String()
 
 	_, err = stmt.ExecContext(ctx, n.ID, n.Name, n.Description, n.Type, n.Start, n.ShiftLength, n.Start.Location().String())
 	if err != nil {
@@ -491,7 +493,7 @@ func (db *DB) FindMany(ctx context.Context, ids []string) ([]Rotation, error) {
 
 	userID := permission.UserID(ctx)
 	rows, err := db.findMany.QueryContext(ctx, sqlutil.UUIDArray(ids), userID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -720,7 +722,7 @@ func (db *DB) AddParticipantTx(ctx context.Context, tx *sql.Tx, p *Participant) 
 		stmt = tx.Stmt(stmt)
 	}
 
-	n.ID = uuid.NewV4().String()
+	n.ID = uuid.New().String()
 
 	row := stmt.QueryRowContext(ctx, n.ID, n.RotationID, n.Target.TargetID())
 	err = row.Scan(&n.Position)
@@ -753,7 +755,7 @@ func (db *DB) RemoveParticipantTx(ctx context.Context, tx *sql.Tx, id string) (s
 	if err != nil {
 		return "", err
 	}
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
 	if err != nil {
@@ -860,13 +862,18 @@ func (db *DB) AddRotationUsersTx(ctx context.Context, tx *sql.Tx, rotationID str
 		return err
 	}
 
-	stmt := db.addParticipants
+	stmt := db.addParticipant
 	if tx != nil {
 		stmt = tx.StmtContext(ctx, stmt)
 	}
-	_, err = stmt.ExecContext(ctx, rotationID, sqlutil.UUIDArray(userIDs))
+	for _, userID := range userIDs {
+		_, err = stmt.ExecContext(ctx, uuid.New().String(), rotationID, userID)
+		if err != nil {
+			return err
+		}
+	}
 
-	return err
+	return nil
 }
 
 func (db *DB) DeleteRotationParticipantsTx(ctx context.Context, tx *sql.Tx, partIDs []string) error {

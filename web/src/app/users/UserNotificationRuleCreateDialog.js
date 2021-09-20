@@ -1,48 +1,25 @@
-import React from 'react'
-import p from 'prop-types'
+import React, { useState } from 'react'
+import { gql } from '@apollo/client'
 
-import gql from 'graphql-tag'
-import { Mutation } from 'react-apollo'
+import p from 'prop-types'
+import { Mutation } from '@apollo/client/react/components'
 import { fieldErrors, nonFieldErrors } from '../util/errutil'
 
 import FormDialog from '../dialogs/FormDialog'
 import UserNotificationRuleForm from './UserNotificationRuleForm'
 
 const createMutation = gql`
-  mutation($input: CreateUserNotificationRuleInput!) {
+  mutation ($input: CreateUserNotificationRuleInput!) {
     createUserNotificationRule(input: $input) {
       id
     }
   }
 `
 
-export default class UserNotificationRuleCreateDialog extends React.PureComponent {
-  static propTypes = {
-    userID: p.string.isRequired,
-    onClose: p.func,
-  }
+export default function UserNotificationRuleCreateDialog({ onClose, userID }) {
+  const [value, setValue] = useState({ contactMethodID: '', delayMinutes: 0 })
 
-  state = {
-    value: {
-      contactMethodID: '',
-      delayMinutes: '0',
-    },
-    errors: [],
-  }
-
-  render() {
-    return (
-      <Mutation
-        mutation={createMutation}
-        refetchQueries={['nrList']}
-        onCompleted={this.props.onClose}
-      >
-        {(commit, status) => this.renderDialog(commit, status)}
-      </Mutation>
-    )
-  }
-
-  renderDialog(commit, status) {
+  function renderDialog(commit, status) {
     const { loading, error } = status
     const fieldErrs = fieldErrors(error)
 
@@ -51,24 +28,35 @@ export default class UserNotificationRuleCreateDialog extends React.PureComponen
         title='Create New Notification Rule'
         loading={loading}
         errors={nonFieldErrors(error)}
-        onClose={this.props.onClose}
+        onClose={onClose}
         onSubmit={() => {
           return commit({
             variables: {
-              input: { ...this.state.value, userID: this.props.userID },
+              input: { ...value, userID: userID },
             },
           })
         }}
         form={
           <UserNotificationRuleForm
-            userID={this.props.userID}
+            userID={userID}
             errors={fieldErrs}
             disabled={loading}
-            value={this.state.value}
-            onChange={value => this.setState({ value })}
+            value={value}
+            onChange={(value) => setValue(value)}
           />
         }
       />
     )
   }
+
+  return (
+    <Mutation mutation={createMutation} onCompleted={onClose}>
+      {(commit, status) => renderDialog(commit, status)}
+    </Mutation>
+  )
+}
+
+UserNotificationRuleCreateDialog.propTypes = {
+  userID: p.string.isRequired,
+  onClose: p.func,
 }

@@ -1,16 +1,20 @@
 package app
 
 import (
+	"context"
 	"crypto/tls"
 	"database/sql"
 	"net"
 	"net/http"
 
+	"github.com/pkg/errors"
 	"github.com/target/goalert/alert"
 	alertlog "github.com/target/goalert/alert/log"
 	"github.com/target/goalert/app/lifecycle"
 	"github.com/target/goalert/auth"
+	"github.com/target/goalert/auth/basic"
 	"github.com/target/goalert/auth/nonce"
+	"github.com/target/goalert/calendarsubscription"
 	"github.com/target/goalert/config"
 	"github.com/target/goalert/engine"
 	"github.com/target/goalert/engine/resolver"
@@ -22,6 +26,7 @@ import (
 	"github.com/target/goalert/keyring"
 	"github.com/target/goalert/label"
 	"github.com/target/goalert/limit"
+	"github.com/target/goalert/notice"
 	"github.com/target/goalert/notification"
 	"github.com/target/goalert/notification/slack"
 	"github.com/target/goalert/notification/twilio"
@@ -38,13 +43,13 @@ import (
 	"github.com/target/goalert/user/favorite"
 	"github.com/target/goalert/user/notificationrule"
 	"github.com/target/goalert/util/sqlutil"
-
-	"github.com/pkg/errors"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
 )
 
 // App represents an instance of the GoAlert application.
 type App struct {
-	cfg appConfig
+	cfg Config
 
 	mgr *lifecycle.Manager
 
@@ -55,15 +60,19 @@ type App struct {
 	cooldown *cooldown
 	doneCh   chan struct{}
 
+	sysAPIL   net.Listener
+	sysAPISrv *grpc.Server
+	hSrv      *health.Server
+
 	srv         *http.Server
 	requestLock *contextLocker
 	startupErr  error
 
 	notificationManager *notification.Manager
-	engine              *engine.Engine
+	Engine              *engine.Engine
 	graphql             *graphql.Handler
 	graphql2            *graphqlapp.App
-	authHandler         *auth.Handler
+	AuthHandler         *auth.Handler
 
 	twilioSMS    *twilio.SMS
 	twilioVoice  *twilio.Voice
@@ -76,7 +85,8 @@ type App struct {
 	AlertStore    alert.Store
 	AlertLogStore alertlog.Store
 
-	UserStore             user.Store
+	AuthBasicStore        *basic.Store
+	UserStore             *user.Store
 	ContactMethodStore    contactmethod.Store
 	NotificationRuleStore notificationrule.Store
 	FavoriteStore         favorite.Store
@@ -86,26 +96,29 @@ type App struct {
 	IntegrationKeyStore integrationkey.Store
 	ScheduleRuleStore   rule.Store
 	NotificationStore   notification.Store
-	ScheduleStore       schedule.Store
+	ScheduleStore       *schedule.Store
 	RotationStore       rotation.Store
 
+	CalSubStore    *calendarsubscription.Store
 	OverrideStore  override.Store
 	Resolver       resolver.Resolver
-	LimitStore     limit.Store
-	HeartbeatStore heartbeat.Store
+	LimitStore     *limit.Store
+	HeartbeatStore *heartbeat.Store
 
 	OAuthKeyring   keyring.Keyring
 	SessionKeyring keyring.Keyring
+	APIKeyring     keyring.Keyring
 
-	NonceStore    nonce.Store
+	NonceStore    *nonce.Store
 	LabelStore    label.Store
 	OnCallStore   oncall.Store
 	NCStore       notificationchannel.Store
 	TimeZoneStore *timezone.Store
+	NoticeStore   *notice.Store
 }
 
 // NewApp constructs a new App and binds the listening socket.
-func NewApp(c appConfig, db *sql.DB) (*App, error) {
+func NewApp(c Config, db *sql.DB) (*App, error) {
 	l, err := net.Listen("tcp", c.ListenAddr)
 	if err != nil {
 		return nil, errors.Wrapf(err, "bind address %s", c.ListenAddr)
@@ -120,13 +133,15 @@ func NewApp(c appConfig, db *sql.DB) (*App, error) {
 	}
 
 	app := &App{
-		l:        l,
-		db:       db,
-		cfg:      c,
-		doneCh:   make(chan struct{}),
-		cooldown: newCooldown(c.KubernetesCooldown),
+		l:      l,
+		db:     db,
+		cfg:    c,
+		doneCh: make(chan struct{}),
 
 		requestLock: newContextLocker(),
+	}
+	if c.KubernetesCooldown > 0 {
+		app.cooldown = newCooldown(c.KubernetesCooldown)
 	}
 
 	if c.StatusAddr != "" {
@@ -146,6 +161,17 @@ func NewApp(c appConfig, db *sql.DB) (*App, error) {
 	}
 
 	return app, nil
+}
+
+// WaitForStartup will wait until the startup sequence is completed or the context is expired.
+func (a *App) WaitForStartup(ctx context.Context) error { return a.mgr.WaitForStartup(ctx) }
+
+// DB returns the sql.DB instance used by the application.
+func (a *App) DB() *sql.DB { return a.db }
+
+// URL returns the non-TLS listener URL of the application.
+func (a *App) URL() string {
+	return "http://" + a.l.Addr().String()
 }
 
 // Status returns the current lifecycle status of the App.

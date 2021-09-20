@@ -6,8 +6,7 @@ import (
 	"strings"
 )
 
-func (h *Harness) watchBackendLogs(r io.Reader, urlCh chan string) {
-	defer close(urlCh)
+func (h *Harness) watchBackendLogs(r io.Reader) {
 	dec := json.NewDecoder(r)
 	var entry struct {
 		Error        string
@@ -28,8 +27,10 @@ func (h *Harness) watchBackendLogs(r io.Reader, urlCh chan string) {
 		}
 		return false
 	}
+
+	h.IgnoreErrorsWith("rotation advanced late")
+
 	var err error
-	var sent bool
 	for {
 		err = dec.Decode(&entry)
 		if err != nil {
@@ -44,10 +45,6 @@ func (h *Harness) watchBackendLogs(r io.Reader, urlCh chan string) {
 		} else {
 			h.t.Logf("Backend: %s %s", strings.ToUpper(entry.Level), entry.Message)
 		}
-		if !sent && entry.URL != "" {
-			sent = true
-			urlCh <- entry.URL
-		}
 	}
 	if h.isClosing() {
 		return
@@ -60,11 +57,4 @@ func (h *Harness) watchBackendLogs(r io.Reader, urlCh chan string) {
 	}
 
 	h.t.Errorf("failed to read/parse JSON logs: %v", err)
-}
-func (h *Harness) watchBackend(c io.Closer) {
-	defer c.Close()
-	err := h.cmd.Wait()
-	if err != nil && !h.isClosing() {
-		h.t.Errorf("backend failed: %v", err)
-	}
 }

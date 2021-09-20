@@ -1,3 +1,4 @@
-/web/src/node_modules/
-/bin/
+node_modules
 smoketest_db_dump
+.git/
+/bin

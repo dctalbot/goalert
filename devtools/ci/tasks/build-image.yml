@@ -2,19 +2,16 @@ platform: linux
 
 image_resource:
   type: registry-image
-  source: { repository: concourse/builder-task }
+  source: { repository: concourse/oci-build-task }
 
 params:
-  REPOSITORY: goalert/goalert
-  TAG: latest
-  CONTEXT: bin/goalert
-  DOCKERFILE: goalert/devtools/ci/dockerfiles/goalert/Dockerfile
+  CONTEXT: goalert
+  DOCKERFILE: goalert/devtools/ci/dockerfiles/goalert/Dockerfile.buildx
 
 inputs:
   - name: goalert
-  - name: bin
 
 outputs:
   - name: image
 
-run: { path: /usr/bin/build }
+run: { path: build }

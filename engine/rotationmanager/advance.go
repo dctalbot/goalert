@@ -1,38 +1,61 @@
 package rotationmanager
 
 import (
-	"github.com/target/goalert/schedule/rotation"
+	"context"
+	"fmt"
 	"time"
+
+	"github.com/target/goalert/schedule/rotation"
+	"github.com/target/goalert/util/log"
 )
 
 type advance struct {
-	id string
-	t  time.Time
-	p  int
+	id          string
+	newPosition int
+
+	silent bool
+}
+
+type rotState struct {
+	rotation.State
+	Version int
 }
 
 // calcAdvance will calculate rotation advancement if it is required. If not, nil is returned
-func calcAdvance(t time.Time, rot *rotation.Rotation, state rotation.State, partCount int) *advance {
+func calcAdvance(ctx context.Context, t time.Time, rot *rotation.Rotation, state rotState, partCount int) *advance {
+	var mustUpdate bool
+	origPos := state.Position
 
 	// get next shift start time
 	newStart := rot.EndTime(state.ShiftStart)
-	var mustUpdate bool
+	if state.Version == 1 {
+		newStart = calcVersion1EndTime(rot, state.ShiftStart)
+		mustUpdate = true
+	}
+
 	if state.Position >= partCount {
 		// deleted last participant
 		state.Position = 0
 		mustUpdate = true
 	}
 
-	if newStart.After(t) {
+	if newStart.After(t) || state.Version == 1 {
 		if mustUpdate {
 			return &advance{
-				id: rot.ID,
-				t:  state.ShiftStart,
-				p:  state.Position,
+				id:          rot.ID,
+				newPosition: state.Position,
+
+				// If migrating from version 1 to 2 without changing
+				// who's on-call do so silently.
+				silent: state.Version == 1 && state.Position == origPos,
 			}
 		}
 		// in the future, so nothing to do yet
 		return nil
+	}
+
+	if !newStart.After(t.Add(-15 * time.Minute)) {
+		log.Log(log.WithField(ctx, "RotationID", rot.ID), fmt.Errorf("rotation advanced late (%s)", t.Sub(newStart).String()))
 	}
 
 	state.ShiftStart = newStart
@@ -53,8 +76,7 @@ func calcAdvance(t time.Time, rot *rotation.Rotation, state rotation.State, part
 	}
 
 	return &advance{
-		id: rot.ID,
-		t:  state.ShiftStart,
-		p:  state.Position,
+		id:          rot.ID,
+		newPosition: state.Position,
 	}
 }

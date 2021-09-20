@@ -1,31 +1,37 @@
-import ApolloClient from 'apollo-client'
-import { ApolloLink } from 'apollo-link'
-import { createHttpLink } from 'apollo-link-http'
-import { RetryLink } from 'apollo-link-retry'
-import { InMemoryCache } from 'apollo-cache-inmemory'
-import { camelCase } from 'lodash-es'
-import { toIdValue } from 'apollo-utilities'
+import {
+  ApolloClient,
+  InMemoryCache,
+  ApolloLink,
+  createHttpLink,
+} from '@apollo/client'
+import { RetryLink } from '@apollo/client/link/retry'
 import { authLogout } from './actions'
 
 import reduxStore from './reduxStore'
 import { POLL_INTERVAL } from './config'
+import promiseBatch from './util/promiseBatch'
+import { pathPrefix } from './env'
 
 let pendingMutations = 0
-window.onbeforeunload = function(e) {
+window.onbeforeunload = function (e) {
   if (!pendingMutations) {
     return
   }
-  let dialogText =
+  const dialogText =
     'Your changes have not finished saving. If you leave this page, they could be lost.'
   e.returnValue = dialogText
   return dialogText
 }
 
-const trackMutation = p => {
+const trackMutation = (p) => {
   pendingMutations++
-  p.then(() => pendingMutations--, () => pendingMutations--)
+  p.then(
+    () => pendingMutations--,
+    () => pendingMutations--,
+  )
 }
-export function doFetch(body, url = '/v1/graphql') {
+
+export function doFetch(body, url = pathPrefix + '/api/graphql') {
   const f = fetch(url, {
     credentials: 'same-origin',
     method: 'POST',
@@ -39,7 +45,7 @@ export function doFetch(body, url = '/v1/graphql') {
   if (body.query && body.query.startsWith && body.query.startsWith('mutation'))
     trackMutation(f)
 
-  return f.then(res => {
+  return promiseBatch(f).then((res) => {
     if (res.ok) {
       return res
     }
@@ -60,7 +66,7 @@ const retryLink = new RetryLink({
   },
   attempts: {
     max: 5,
-    retryIf: (error, _operation) => {
+    retryIf: (error) => {
       // Retry on any error except HTTP Response errors with the
       // exception of 502-504 response codes (e.g. no retry on 401/auth etc..).
       return (
@@ -72,27 +78,8 @@ const retryLink = new RetryLink({
   },
 })
 
-const defaultHttpLink = createHttpLink({
-  uri: '/v1/graphql',
-  fetch: (url, opts) => {
-    return doFetch(opts.body)
-  },
-})
-
-// compose links
-const defaultLink = ApolloLink.from([
-  retryLink,
-  defaultHttpLink, // terminating link must be last: apollographql.com/docs/link/overview.html#terminating
-])
-
-export const LegacyGraphQLClient = new ApolloClient({
-  link: defaultLink,
-  cache: new InMemoryCache(),
-  defaultOptions: { errorPolicy: 'all' },
-})
-
 const graphql2HttpLink = createHttpLink({
-  uri: '/api/graphql',
+  uri: pathPrefix + '/api/graphql',
   fetch: (url, opts) => {
     return doFetch(opts.body, url)
   },
@@ -101,32 +88,88 @@ const graphql2HttpLink = createHttpLink({
 const graphql2Link = ApolloLink.from([retryLink, graphql2HttpLink])
 
 const simpleCacheTypes = [
-  'Alert',
-  'Rotation',
-  'Schedule',
-  'EscalationPolicy',
-  'Service',
-  'User',
-  'SlackChannel',
+  'alert',
+  'rotation',
+  'schedule',
+  'escalationPolicy',
+  'service',
+  'user',
+  'slackChannel',
+  'phoneNumberInfo',
 ]
 
-// tell Apollo to use cached data for `type(id: foo) {... }` queries
-const queryCache = {}
-let cache
-simpleCacheTypes.forEach(name => {
-  queryCache[camelCase(name)] = (_, args) =>
-    args &&
-    toIdValue(
-      cache.config.dataIdFromObject({
-        __typename: name,
-        id: args.id,
-      }),
-    )
+// NOTE: see https://www.apollographql.com/docs/react/caching/advanced-topics/#cache-redirects-using-field-policy-read-functions
+const typePolicyQueryFields = {}
+simpleCacheTypes.forEach((name) => {
+  typePolicyQueryFields[name] = {
+    read(existingData, { args, toReference, canRead }) {
+      return canRead(existingData)
+        ? existingData
+        : toReference({
+            __typename: name,
+            id: args?.id,
+          })
+    },
+  }
 })
-cache = new InMemoryCache({
-  cacheRedirects: {
+
+const cache = new InMemoryCache({
+  typePolicies: {
     Query: {
-      ...queryCache,
+      fields: typePolicyQueryFields,
+    },
+    EscalationPolicy: {
+      fields: {
+        steps: {
+          merge: false,
+        },
+      },
+    },
+    Rotation: {
+      fields: {
+        users: {
+          merge: false,
+        },
+      },
+    },
+    Schedule: {
+      fields: {
+        targets: {
+          merge: false,
+        },
+        onCallNotificationRules: {
+          merge: false,
+        },
+      },
+    },
+    Service: {
+      fields: {
+        heartbeatMonitors: {
+          merge: false,
+        },
+        integrationKeys: {
+          merge: false,
+        },
+        labels: {
+          merge: false,
+        },
+      },
+    },
+    User: {
+      fields: {
+        calendarSubscriptions: {
+          merge: false,
+        },
+        contactMethods: {
+          merge: false,
+        },
+        notificationRules: {
+          merge: false,
+        },
+        sessions: {
+          merge: false,
+        },
+      },
     },
   },
 })
@@ -141,6 +184,41 @@ export const GraphQLClient = new ApolloClient({
   cache,
   defaultOptions: {
     query: queryOpts,
-    mutate: { awaitRefetchQueries: true },
+    watchQuery: queryOpts,
   },
 })
+
+// errorPolicy can only be set "globally" but breaks if we enable it for existing
+// code. Eventually we should transition everything to expect/handle explicit errors.
+export const GraphQLClientWithErrors = new ApolloClient({
+  link: graphql2Link,
+  cache,
+  defaultOptions: {
+    query: queryOpts,
+    watchQuery: queryOpts,
+    mutate: { awaitRefetchQueries: true, errorPolicy: 'all' },
+  },
+})
+
+// refetch all *active* polling queries on mutations
+const mutate = GraphQLClient.mutate
+GraphQLClient.mutate = (...args) => {
+  return mutate.call(GraphQLClient, ...args).then((result) => {
+    return Promise.all([
+      GraphQLClient.reFetchObservableQueries(true),
+      GraphQLClientWithErrors.reFetchObservableQueries(true),
+    ]).then(() => result)
+  })
+}
+
+const mutateWithErrors = GraphQLClientWithErrors.mutate
+GraphQLClientWithErrors.mutate = (...args) => {
+  return mutateWithErrors
+    .call(GraphQLClientWithErrors, ...args)
+    .then((result) => {
+      return Promise.all([
+        GraphQLClient.reFetchObservableQueries(true),
+        GraphQLClientWithErrors.reFetchObservableQueries(true),
+      ]).then(() => result)
+    })
+}
